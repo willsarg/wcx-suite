@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import config, system
+from . import config, probe, system
 
 
 def _ensure_utf8(stream) -> None:
@@ -48,6 +48,16 @@ def cmd_system() -> int:
     return 0
 
 
+def cmd_calibrate() -> int:
+    cal = probe.calibrate()
+    if cal is None:
+        print("  calibration failed — is CUDA available? (needs the [cuda] extra: torch)")
+        return 1
+    print(f"  device         {cal.device}")
+    print(f"  CUDA overhead  {cal.overhead_gb:.2f} GB   fixed VRAM cost before any model weights")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _ensure_utf8(sys.stdout)
     parser = argparse.ArgumentParser(
@@ -55,9 +65,12 @@ def main(argv: list[str] | None = None) -> int:
         description="VRAM/stress bench for local CUDA inference — safe context ceilings.")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("system", help="show the GPU's VRAM wall, free memory, and safe budget")
+    sub.add_parser("calibrate", help="measure the CUDA context's fixed VRAM overhead")
     args = parser.parse_args(argv)
 
     if args.command == "system":
         return cmd_system()
+    if args.command == "calibrate":
+        return cmd_calibrate()
     parser.print_help()
     return 1

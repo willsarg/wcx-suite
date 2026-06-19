@@ -30,6 +30,22 @@ def test_main_no_command_shows_help(capsys):
     assert "wcx-suite" in capsys.readouterr().out
 
 
+def test_main_calibrate_prints_overhead(monkeypatch, capsys):
+    monkeypatch.setattr(cli.probe, "calibrate",
+                        lambda: cli.probe.Calibration(device="RTX 2070", overhead_gb=0.42))
+    rc = cli.main(["calibrate"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "RTX 2070" in out and "0.42 GB" in out
+
+
+def test_main_calibrate_fails_without_cuda(monkeypatch, capsys):
+    monkeypatch.setattr(cli.probe, "calibrate", lambda: None)
+    rc = cli.main(["calibrate"])
+    assert rc == 1
+    assert "calibration failed" in capsys.readouterr().out
+
+
 # UTF-8 stdout so Windows' legacy cp1252 console doesn't crash on glyphs (−, —).
 class _FakeStream:
     def __init__(self, encoding="cp1252", raises=None):
