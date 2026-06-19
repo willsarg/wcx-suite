@@ -30,6 +30,10 @@ def calibrate() -> dict:
     before = _used_mb()
     torch.cuda.init()
     torch.zeros(1, device="cuda")      # force the context to materialize
+    # cuBLAS/cuDNN load lazily on first use — but every real model run pays for them,
+    # so a tiny matmul forces them in now. Otherwise we'd undercount overhead (unsafe).
+    _m = torch.randn(64, 64, device="cuda")
+    (_m @ _m).sum().item()
     torch.cuda.synchronize()
     after = _used_mb()
     if before is None or after is None:
