@@ -8,8 +8,26 @@ wmx-suite, but against CUDA VRAM instead of Apple's unified-memory working set.
 from __future__ import annotations
 
 import argparse
+import sys
 
 from . import config, system
+
+
+def _ensure_utf8(stream) -> None:
+    """Best-effort: make *stream* emit UTF-8 without crashing on a glyph.
+
+    Windows consoles default to a legacy codepage (cp1252), where our output glyphs
+    (−, —, ·) raise UnicodeEncodeError on a plain print. Reconfiguring to UTF-8 with
+    errors='replace' makes output crash-proof; no-op on already-UTF-8 or plain streams.
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    encoding = (getattr(stream, "encoding", "") or "").lower()
+    if reconfigure is None or encoding.startswith("utf"):
+        return
+    try:
+        reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, LookupError):
+        pass
 
 
 def _print_system(lim: "system.GPULimits") -> None:
@@ -31,6 +49,7 @@ def cmd_system() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _ensure_utf8(sys.stdout)
     parser = argparse.ArgumentParser(
         prog="wcx-suite",
         description="VRAM/stress bench for local CUDA inference — safe context ceilings.")

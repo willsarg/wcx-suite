@@ -28,3 +28,40 @@ def test_main_no_command_shows_help(capsys):
     rc = cli.main([])
     assert rc == 1
     assert "wcx-suite" in capsys.readouterr().out
+
+
+# UTF-8 stdout so Windows' legacy cp1252 console doesn't crash on glyphs (−, —).
+class _FakeStream:
+    def __init__(self, encoding="cp1252", raises=None):
+        self.encoding = encoding
+        self._raises = raises
+        self.reconfigured = None
+
+    def reconfigure(self, **kwargs):
+        if self._raises is not None:
+            raise self._raises
+        self.reconfigured = kwargs
+        self.encoding = kwargs.get("encoding", self.encoding)
+
+
+def test_ensure_utf8_reconfigures_legacy_codepage():
+    s = _FakeStream("cp1252")
+    cli._ensure_utf8(s)
+    assert s.reconfigured == {"encoding": "utf-8", "errors": "replace"}
+
+
+def test_ensure_utf8_skips_utf8_stream():
+    s = _FakeStream("utf-8")
+    cli._ensure_utf8(s)
+    assert s.reconfigured is None
+
+
+def test_ensure_utf8_noop_without_reconfigure():
+    import io
+    cli._ensure_utf8(io.StringIO())   # no reconfigure attr → must not raise
+
+
+def test_ensure_utf8_swallows_failure():
+    s = _FakeStream("cp1252", raises=ValueError("nope"))
+    cli._ensure_utf8(s)
+    assert s.reconfigured is None
