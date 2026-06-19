@@ -45,7 +45,49 @@ def calibrate() -> dict:
     }
 
 
-_MODES = {"calibrate": calibrate}
+def characterize(model_id: str, contexts_csv: str) -> dict:
+    """Load *model_id* on the GPU and measure total VRAM at each context in *contexts_csv*.
+
+    Probes small→large; stops at the first context that errors/OOMs, keeping the safe points
+    below it. Total VRAM is nvidia-smi ``used`` after a synchronized forward — it captures the
+    display baseline, the CUDA context, and torch's (retained) reserved pool, so it's the
+    conservative number to compare against the wall.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    if not torch.cuda.is_available():
+        return {"ok": False, "error": "CUDA not available"}
+    device = torch.cuda.get_device_name(0)
+    contexts = [int(c) for c in contexts_csv.split(",") if c]
+    try:
+        AutoTokenizer.from_pretrained(model_id)   # validate + warm the cache
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id, torch_dtype=torch.float16).to("cuda")
+        model.eval()
+    except Exception as exc:
+        return {"ok": False, "error": f"load failed: {type(exc).__name__}: {exc}"}
+
+    points: list[dict] = []
+    for ctx in contexts:
+        try:
+            ids = torch.randint(0, int(model.config.vocab_size), (1, ctx), device="cuda")
+            with torch.no_grad():
+                model(ids)
+            torch.cuda.synchronize()
+        except Exception:
+            break   # OOM/error at this context — stop, keep the safe points below it
+        used = _used_mb()
+        if used is None:
+            return {"ok": False, "error": "nvidia-smi unavailable"}
+        points.append({"context": ctx, "used_gb": used / system.MIB_PER_GB})
+
+    if not points:
+        return {"ok": False, "error": "no contexts measured"}
+    return {"ok": True, "device": device, "model": model_id, "points": points}
+
+
+_MODES = {"calibrate": calibrate, "characterize": characterize}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -56,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         result: dict = {"ok": False, "error": f"unknown mode: {mode!r}"}
     else:
         try:
-            result = fn()
+            result = fn(*argv[1:])
         except Exception as exc:   # never let a GPU fault escape as a traceback
             result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     print(json.dumps(result))

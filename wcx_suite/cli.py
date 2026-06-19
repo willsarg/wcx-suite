@@ -58,6 +58,26 @@ def cmd_calibrate() -> int:
     return 0
 
 
+def cmd_characterize(model: str) -> int:
+    lim = system.read_limits()
+    if lim is None:
+        print("  no NVIDIA GPU detected (nvidia-smi unavailable or no CUDA device)")
+        return 1
+    budget = lim.safe_threshold_gb(config.margin_gb())
+    print(f"  probing {model} on {lim.device} … (loads the model on the GPU)")
+    c = probe.characterize(model, budget_gb=budget)
+    if c is None:
+        print("  characterize failed — model didn't load/measure (OOM, or missing [cuda] extra?)")
+        return 1
+    for ctx, used in c.points:
+        print(f"    {ctx:>6} tokens  →  {used:.2f} GB used")
+    if c.safe_context is None:
+        print("  not context-bound on this card (VRAM didn't grow with context here)")
+    else:
+        print(f"  safe context ceiling  ~{c.safe_context} tokens   (budget {budget:.1f} GB)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _ensure_utf8(sys.stdout)
     parser = argparse.ArgumentParser(
@@ -66,11 +86,16 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("system", help="show the GPU's VRAM wall, free memory, and safe budget")
     sub.add_parser("calibrate", help="measure the CUDA context's fixed VRAM overhead")
+    ch = sub.add_parser("characterize", help="probe a model → safe context ceiling on this GPU")
+    ch.add_argument("model", nargs="?", default=probe.DEFAULT_PROBE_MODEL,
+                    help="HF model id (default: a tiny SmolLM)")
     args = parser.parse_args(argv)
 
     if args.command == "system":
         return cmd_system()
     if args.command == "calibrate":
         return cmd_calibrate()
+    if args.command == "characterize":
+        return cmd_characterize(args.model)
     parser.print_help()
     return 1

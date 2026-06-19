@@ -28,6 +28,34 @@ def test_calibrate_none_when_worker_not_ok(monkeypatch):
     assert probe.calibrate() is None
 
 
+def test_characterize_fits_and_extrapolates(monkeypatch):
+    seen = {}
+
+    def fake_worker(args, timeout=600):
+        seen["args"] = args
+        return {"ok": True, "device": "RTX 2070",
+                "points": [{"context": 512, "used_gb": 2.0},
+                           {"context": 2048, "used_gb": 2.6}]}
+
+    monkeypatch.setattr(probe, "_run_worker", fake_worker)
+    c = probe.characterize("smol-model", budget_gb=7.0, contexts=(512, 2048))
+    assert c is not None
+    assert c.device == "RTX 2070" and c.model == "smol-model"
+    assert c.points == [(512, 2.0), (2048, 2.6)]
+    assert c.safe_context in (13311, 13312)
+    assert seen["args"] == ["characterize", "smol-model", "512,2048"]
+
+
+def test_characterize_none_on_worker_failure(monkeypatch):
+    monkeypatch.setattr(probe, "_run_worker", lambda args, timeout=600: {"ok": False, "error": "OOM"})
+    assert probe.characterize("smol", budget_gb=7.0) is None
+
+
+def test_characterize_none_when_no_output(monkeypatch):
+    monkeypatch.setattr(probe, "_run_worker", lambda args, timeout=600: None)
+    assert probe.characterize("smol", budget_gb=7.0) is None
+
+
 def test_run_worker_parses_json_line(monkeypatch):
     def fake_run(cmd, capture_output, text, timeout):
         return types.SimpleNamespace(stdout='noise\n{"ok": true, "overhead_gb": 0.5}\n',
