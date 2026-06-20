@@ -65,6 +65,22 @@ def _run_worker(args: list[str], timeout: float = 120) -> dict | None:
         return None
 
 
+def measure_once(hf_id: str, ctx: int, *, abort_gb: float, timeout: float = 600) -> dict:
+    """Probe *hf_id* at one context in the isolated GPU worker; normalise to the driver shape.
+
+    The worker speaks ``{ok, ...}``; ARA's :mod:`wcx_suite.measure_one` (and the wmx contract it
+    mirrors) speaks ``{status, ...}``. This is the one adapter between them, so the worker stays
+    uniform. *abort_gb* is the absolute safe budget the worker's watchdog (L5) must not let live
+    VRAM reach. Returns ``{status: "ok", used_gb, baseline_gb}`` or ``{status: "error", note}``.
+    """
+    data = _run_worker(["measure", hf_id, str(ctx), str(abort_gb)], timeout=timeout)
+    if data is None:
+        return {"status": "error", "note": "no output from probe worker"}
+    if not data.get("ok"):
+        return {"status": "error", "note": data.get("error", "probe failed")}
+    return {"status": "ok", "used_gb": data["used_gb"], "baseline_gb": data["baseline_gb"]}
+
+
 def calibrate(timeout: float = 120) -> Calibration | None:
     """Measure the CUDA context's fixed VRAM overhead on this machine, or None if it can't."""
     data = _run_worker(["calibrate"], timeout=timeout)

@@ -1,0 +1,143 @@
+"""Self-vetoing single-measurement primitive — the engine-side hard veto (L4).
+
+ARA's thin path drives the ramp, but crash-prevention is checked at every layer. This is the
+engine's: given a model and one context, it reads the *live* VRAM wall, estimates the footprint
+conservatively, and **refuses before loading anything** if the model's base alone — or the
+prediction at that context — would reach the safe budget. Only when safe does it spawn the
+isolated GPU probe worker (a fresh process, so an OOM/TDR kills the worker, not the suite), which
+carries its own watchdog (L5). It emits one canonical JSON object:
+
+    safe:    {"context": <int>, "mem_gb": <model VRAM delta over its launch baseline>}
+    refused: {"context": <int>, "refused": true, "reason": "<why>"}
+
+Usage: ``python -m wcx_suite.measure_one <hf_id> <ctx> --margin G --overhead G [--preflight]``
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+
+from . import models, probe, system
+
+# fp16 weights load into VRAM at ~their on-disk size (already fp16/bf16 checkpoints); a checkpoint
+# stored at higher precision only over-estimates here, which is safe. No MLX-style wired inflation.
+RESIDENT_FACTOR = 1.0
+
+# nvidia-smi `used` after a synchronized forward is deterministic (it captures torch's retained
+# reserved pool), unlike Apple's jittery wired sampler — so a single measurement is stable.
+DEFAULT_REPEATS = 1
+
+
+def _model_base_gb(info, overhead_gb: float) -> float:
+    """The model's own resident VRAM at context 0: weights + the CUDA-context overhead."""
+    return info.weights_gb * RESIDENT_FACTOR + overhead_gb
+
+
+def safety_gate(info, limits, ctx: int, *, margin_gb: float, overhead_gb: float,
+                live_base: float) -> str | None:
+    """Return a refusal reason if probing (model, ctx) is unsafe, else None.
+
+    Two independent, conservative (``>=``) refusals: the absolute base footprint must fit on its
+    own (the model can load alongside whatever already uses the card), and the predicted footprint
+    at *ctx* (live baseline + model base + a-priori KV slope) must stay strictly under budget.
+    """
+    threshold = limits.safe_threshold_gb(margin_gb)
+    base = live_base + _model_base_gb(info, overhead_gb)
+    if base >= threshold:
+        return f"base estimate {base:.2f}GB >= safe budget {threshold:.2f}GB — won't load"
+    predicted = base + info.estimated_slope_gb_per_k() * (ctx / 1000)
+    if predicted >= threshold:
+        return f"predicted {predicted:.2f}GB at {ctx} tok >= safe budget {threshold:.2f}GB"
+    return None
+
+
+def preflight(hf_id: str, *, margin_gb: float, overhead_gb: float) -> dict:
+    """No-load estimate for ARA's scheduler: the context→0 base, a-priori slope, budget, window.
+
+    ARA owns the ramp methodology but not CUDA model knowledge, so the engine supplies the facts
+    (model config + the live VRAM wall); ARA fits and solves on top.
+    """
+    info = models.describe(hf_id)
+    if info is None:
+        return {"error": f"model not found in HF cache: {hf_id}"}
+    if not info.is_causal:
+        return {"error": f"{hf_id} is not a supported causal language model"}
+    limits = system.read_limits()
+    if limits is None:
+        return {"error": "no NVIDIA GPU visible to nvidia-smi"}
+    live_base = limits.used_gb              # live VRAM in use (display + other procs) right now
+    return {
+        "base_gb": round(live_base + _model_base_gb(info, overhead_gb), 4),
+        "ref_baseline_gb": round(live_base, 4),
+        "slope_gb_per_k": info.estimated_slope_gb_per_k(),
+        "budget_gb": limits.safe_threshold_gb(margin_gb),
+        "max_context": info.max_context,
+    }
+
+
+def _spawn_worker(hf_id: str, ctx: int, abort_gb: float) -> dict:
+    """Run the isolated GPU probe worker for one context; return its raw result dict.
+
+    The worker gets the absolute safe budget as its hard abort limit, so its watchdog (L5) can
+    kill the process if live VRAM reaches it despite the pre-flight gate.
+    """
+    return probe.measure_once(hf_id, ctx, abort_gb=abort_gb)
+
+
+def _refused(ctx: int, reason: str) -> dict:
+    return {"context": ctx, "refused": True, "reason": reason}
+
+
+def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float,
+        repeats: int = DEFAULT_REPEATS) -> dict:
+    """Gate then (if safe) measure; return the canonical result dict.
+
+    ``mem_gb`` is the model's VRAM DELTA over its own launch baseline (``used − baseline``),
+    median over *repeats* fresh runs. ARA adds the live ref_baseline back at solve time.
+    """
+    info = models.describe(hf_id)
+    if info is None:
+        return _refused(ctx, f"model not found in HF cache: {hf_id}")
+    if not info.is_causal:
+        return _refused(ctx, f"{hf_id} is not a supported causal language model")
+    limits = system.read_limits()
+    if limits is None:
+        return _refused(ctx, "no NVIDIA GPU visible to nvidia-smi")
+
+    live_base = limits.used_gb
+    reason = safety_gate(info, limits, ctx, margin_gb=margin_gb,
+                         overhead_gb=overhead_gb, live_base=live_base)
+    if reason is not None:
+        return _refused(ctx, reason)
+
+    threshold = limits.safe_threshold_gb(margin_gb)
+    deltas = []
+    for _ in range(max(1, repeats)):
+        raw = _spawn_worker(hf_id, ctx, abort_gb=threshold)
+        if raw.get("status") != "ok":
+            return _refused(ctx, f"probe failed: {raw.get('note', 'no output')}")
+        deltas.append(raw["used_gb"] - raw["baseline_gb"])
+    return {"context": ctx, "mem_gb": round(statistics.median(deltas), 3)}
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(description="Safe single-context VRAM measurement.")
+    ap.add_argument("hf_id")
+    ap.add_argument("ctx", type=int)
+    ap.add_argument("--margin", type=float, required=True)
+    ap.add_argument("--overhead", type=float, required=True)
+    ap.add_argument("--preflight", action="store_true",
+                    help="print the no-load estimate (base/slope/budget) and exit")
+    ap.add_argument("--repeats", type=int, default=DEFAULT_REPEATS)
+    args = ap.parse_args(argv)
+    if args.preflight:
+        result = preflight(args.hf_id, margin_gb=args.margin, overhead_gb=args.overhead)
+    else:
+        result = run(args.hf_id, args.ctx, margin_gb=args.margin,
+                     overhead_gb=args.overhead, repeats=args.repeats)
+    print(json.dumps(result), flush=True)
+
+
+if __name__ == "__main__":
+    main()

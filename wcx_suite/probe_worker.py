@@ -2,6 +2,7 @@
 not the suite. Emits exactly one JSON line on stdout.
 
     python -m wcx_suite.probe_worker calibrate
+    python -m wcx_suite.probe_worker measure <hf_id> <ctx> <abort_gb>
 
 torch is imported lazily inside each mode, so the module loads without the (heavy,
 NVIDIA-only) ``[cuda]`` extras installed — only running a GPU mode needs them.
@@ -9,15 +10,48 @@ NVIDIA-only) ``[cuda]`` extras installed — only running a GPU mode needs them.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import threading
+import time
 
 from . import system
+
+WATCHDOG_INTERVAL_S = 0.25   # how often the L5 watchdog re-reads live VRAM
 
 
 def _used_mb() -> float | None:
     """VRAM in use right now, in MiB (via nvidia-smi), or None."""
     lim = system.read_limits()
     return None if lim is None else lim.used_gb * system.MIB_PER_GB
+
+
+def _used_gb() -> float | None:
+    """VRAM in use right now, in GB (via nvidia-smi), or None."""
+    mb = _used_mb()
+    return None if mb is None else mb / system.MIB_PER_GB
+
+
+def _poll_abort(abort_gb: float, *, sampler=_used_gb, on_breach=lambda: None) -> bool:
+    """One watchdog tick: if live VRAM has reached *abort_gb*, fire *on_breach* and report True.
+
+    ``>=`` is intentional — the budget is the line live VRAM must never reach (RULE #1). An
+    unreadable sampler (None) is treated as 'can't confirm a breach', so it never false-fires.
+    """
+    used = sampler()
+    if used is not None and used >= abort_gb:
+        on_breach()
+        return True
+    return False
+
+
+def _start_watchdog(abort_gb: float, *, interval: float = WATCHDOG_INTERVAL_S) -> None:
+    """Spawn a daemon thread that hard-kills this process (``os._exit(3)``) the instant live VRAM
+    reaches *abort_gb* — the last line of defence (L5) if the pre-flight gate mis-predicted."""
+    def loop() -> None:
+        while not _poll_abort(abort_gb, on_breach=lambda: os._exit(3)):
+            time.sleep(interval)
+    threading.Thread(target=loop, daemon=True).start()
 
 
 def calibrate() -> dict:
@@ -87,7 +121,49 @@ def characterize(model_id: str, contexts_csv: str) -> dict:
     return {"ok": True, "device": device, "model": model_id, "points": points}
 
 
-_MODES = {"calibrate": calibrate, "characterize": characterize}
+def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None) -> dict:
+    """Load *model_id* on the GPU at one context and return its VRAM delta over the launch baseline.
+
+    Single-context primitive ARA's driver drives (via :func:`probe.measure_once`). Refuses before
+    importing torch if no abort limit is given — running without the L5 watchdog would mean
+    probing toward the wall with no backstop (RULE #1, fail-closed). Reports ``baseline_gb`` (live
+    VRAM before the model loads, in this fresh process) and ``used_gb`` (after a synchronized
+    forward); their difference is the model's own footprint, which ARA re-bases on the live wall.
+    """
+    if abort_gb_str is None:
+        return {"ok": False, "error": "refusing to probe without an abort limit (L5)"}
+    ctx, abort_gb = int(ctx_str), float(abort_gb_str)
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    if not torch.cuda.is_available():
+        return {"ok": False, "error": "CUDA not available"}
+    baseline = _used_gb()
+    if baseline is None:
+        return {"ok": False, "error": "nvidia-smi unavailable"}
+
+    _start_watchdog(abort_gb)        # L5 armed before a single byte of weights loads
+    device = torch.cuda.get_device_name(0)
+    try:
+        AutoTokenizer.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id, torch_dtype=torch.float16).to("cuda")
+        model.eval()
+        ids = torch.randint(0, int(model.config.vocab_size), (1, ctx), device="cuda")
+        with torch.no_grad():
+            model(ids)
+        torch.cuda.synchronize()
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    used = _used_gb()
+    if used is None:
+        return {"ok": False, "error": "nvidia-smi unavailable"}
+    return {"ok": True, "device": device, "used_gb": used, "baseline_gb": baseline}
+
+
+_MODES = {"calibrate": calibrate, "characterize": characterize, "measure": measure}
 
 
 def main(argv: list[str] | None = None) -> int:

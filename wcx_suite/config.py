@@ -9,6 +9,11 @@ import os
 DEFAULT_MARGIN_GB = 1.0
 MARGIN_ENV = "WCX_SUITE_MARGIN_GB"
 
+# Conservative floor for the CUDA-context VRAM overhead (cuBLAS/cuDNN + context) used by the
+# safety gate when no live calibration is available. Real measurement (device.calibrate) almost
+# always exceeds this; the floor only keeps the gate honest on an uncalibrated machine.
+DEFAULT_OVERHEAD_GB = 0.6
+
 
 def margin_gb(value: float | str | None = None) -> float:
     """Return a validated safety margin; an explicit value overrides the environment."""
