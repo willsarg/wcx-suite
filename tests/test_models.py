@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """models.py — classify a model's VRAM behaviour from its HF-cache config (no torch, no GPU)."""
 from __future__ import annotations
 

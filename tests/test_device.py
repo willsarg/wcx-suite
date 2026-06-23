@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """device.py — VRAM limits + CUDA-overhead calibration as JSON workers (for ARA's driver)."""
 from __future__ import annotations
 

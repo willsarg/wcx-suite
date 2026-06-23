@@ -39,4 +39,4 @@ hardware (`ara install --engine wcx`), the way wmx-suite is its Apple-Silicon en
 
 ## License
 
-[MIT](./LICENSE) © Will Sarg
+[Apache 2.0](./LICENSE) © Will Sarg

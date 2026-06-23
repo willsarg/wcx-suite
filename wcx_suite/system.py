@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """GPU memory facts for this machine (NVIDIA / CUDA).
 
 The crash wall is the GPU's **VRAM**. Unlike Apple's unified memory — where crossing the

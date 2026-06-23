@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Device limits + CUDA-overhead calibration as JSON workers — for ARA's out-of-process driver.
 
 ARA owns no CUDA knowledge: it drives these in wcx's isolated env and reads back a single JSON

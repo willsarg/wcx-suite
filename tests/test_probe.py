@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """probe.py — orchestrate the GPU worker subprocess (the heavy lifting is isolated there)."""
 from __future__ import annotations
 

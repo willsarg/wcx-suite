@@ -45,3 +45,20 @@ Find safe ceilings; never probe into out-of-memory. Concretely:
 - **The ARA-facing interface** (when we attach it) mirrors wmx-suite's: `system.read_limits()`,
   `config.margin_gb()`, and eventually `probe.calibrate()` / `models.describe()` / a `db` +
   `profiles` pair. Build toward that shape so ARA's backend adapter stays symmetric.
+
+## License & AI agents (Apache 2.0)
+
+wcx-suite is licensed **Apache-2.0** (`LICENSE`, `NOTICE`). Abide by it in both directions.
+
+**Contributing here (inbound — Apache §5, inbound = outbound; no CLA/DCO):**
+- All contributions are under Apache-2.0.
+- Add only original code, or code under an Apache-2.0-compatible permissive license (MIT/BSD/ISC/Apache-2.0); preserve its copyright/license and record third-party components in `NOTICE`.
+- Never introduce GPL/LGPL/AGPL, proprietary, or unknown-provenance code.
+- Start every new source file with: `# SPDX-License-Identifier: Apache-2.0` and `# Copyright 2026 Will Sarg`.
+- Do not alter or remove `LICENSE`, `NOTICE`, or existing SPDX headers.
+
+**Cloning / forking / redistributing (outbound — Apache §4):**
+- Keep `LICENSE` and `NOTICE` intact in any copy or fork.
+- Retain all SPDX headers and copyright notices in files you carry.
+- State significant changes you make.
+- You may relicense *your own* additions; the Apache-2.0-covered files stay Apache-2.0.

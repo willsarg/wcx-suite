@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """cli.py — the `wcx-suite` entry point (barebones: the `system` view)."""
 from __future__ import annotations
 

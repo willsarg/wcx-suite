@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """probe_worker.py — the subprocess dispatch + JSON contract (GPU modes verified on hardware)."""
 from __future__ import annotations
 

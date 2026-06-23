@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Will's CUDA Suite (wcx-suite) — a custom VRAM/stress bench for local CUDA inference on NVIDIA GPUs.
 
 The sibling of wmx-suite, for the other side of the hardware fence. Same discipline:

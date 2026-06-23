@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """system.py — read the GPU's VRAM facts (the crash wall) from nvidia-smi."""
 from __future__ import annotations
 

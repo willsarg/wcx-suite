@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """measure_one.py — the engine-side single-context primitive: no-load preflight + gated run."""
 from __future__ import annotations
 

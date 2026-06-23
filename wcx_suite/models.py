@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Model registry — read the HF-cache config.json and classify each model's VRAM behaviour.
 
 The CUDA sibling of ``wmx_suite.models``: same job (estimate weights + KV-cache growth from a

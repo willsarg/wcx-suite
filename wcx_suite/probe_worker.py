@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """The process that actually touches the GPU — run in isolation so a crash/OOM kills it,
 not the suite. Emits exactly one JSON line on stdout.
 

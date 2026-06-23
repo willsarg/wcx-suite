@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """config.py — the validated VRAM safety margin."""
 from __future__ import annotations
 

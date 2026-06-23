@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Command-line entry point for the suite.
 
     wcx-suite system        # show the GPU's VRAM wall + free, and the safe budget

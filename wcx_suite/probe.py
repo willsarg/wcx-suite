@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Safe GPU probes: spawn the worker subprocess, parse its one-line JSON, never crash.
 
 All real GPU work lives in ``probe_worker`` (a separate process) so that an out-of-memory

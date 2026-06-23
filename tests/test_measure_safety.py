@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """The L5 VRAM watchdog + measure normalisation — the crash-safety logic that runs without a GPU.
 
 The actual load-and-measure path needs CUDA and is verified on hardware; these tests pin the

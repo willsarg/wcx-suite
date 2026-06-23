@@ -3,8 +3,8 @@ name = "wcx-suite"
 version = "0.1.0"
 description = "Custom VRAM/stress bench for local CUDA inference on NVIDIA GPUs — finds safe context ceilings without exhausting the card."
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Will Sarg" }]
 requires-python = ">=3.12"
 # Core reads VRAM via nvidia-smi (always present with the driver) — zero runtime deps.
