@@ -21,6 +21,11 @@ live on whatever machine the suite runs on** — nothing is hardcoded to one car
 
 ## RULE #1 — STAY UNDER THE VRAM WALL
 
+> This **is** Rule #1 (Safety) of the ARA ecosystem's three rules — **Safety · Reliability ·
+> Accuracy** (canonical: project-ara's `ARA - Product`). The other two hold here too:
+> **Reliability** (tested — see Conventions) and **Accuracy** (measure live; never hardcode or
+> report a number you didn't measure).
+
 Find safe ceilings; never probe into out-of-memory. Concretely:
 
 - **The crash wall is the GPU's VRAM**, read live per machine (barebones: `nvidia-smi`),
