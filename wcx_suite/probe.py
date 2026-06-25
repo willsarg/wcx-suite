@@ -67,15 +67,21 @@ def _run_worker(args: list[str], timeout: float = 120) -> dict | None:
         return None
 
 
-def measure_once(hf_id: str, ctx: int, *, abort_gb: float, timeout: float = 600) -> dict:
+def measure_once(hf_id: str, ctx: int, *, abort_gb: float, kv_bits: int | None = None,
+                 timeout: float = 600) -> dict:
     """Probe *hf_id* at one context in the isolated GPU worker; normalise to the driver shape.
 
     The worker speaks ``{ok, ...}``; ARA's :mod:`wcx_suite.measure_one` (and the wmx contract it
     mirrors) speaks ``{status, ...}``. This is the one adapter between them, so the worker stays
     uniform. *abort_gb* is the absolute safe budget the worker's watchdog (L5) must not let live
-    VRAM reach. Returns ``{status: "ok", used_gb, baseline_gb}`` or ``{status: "error", note}``.
+    VRAM reach. *kv_bits* (when set) measures with a quantized KV cache. Returns
+    ``{status: "ok", used_gb, baseline_gb}`` or ``{status: "error", note}``.
     """
-    data = _run_worker(["measure", hf_id, str(ctx), str(abort_gb)], timeout=timeout)
+    # probe_worker dispatches positionally (fn(*argv[1:])), so kv_bits rides as a 4th positional.
+    args = ["measure", hf_id, str(ctx), str(abort_gb)]
+    if kv_bits is not None:
+        args.append(str(kv_bits))
+    data = _run_worker(args, timeout=timeout)
     if data is None:
         return {"status": "error", "note": "no output from probe worker"}
     if not data.get("ok"):
@@ -107,12 +113,16 @@ class Characterization:
 
 def characterize(model: str, *, budget_gb: float,
                  contexts: tuple[int, ...] = DEFAULT_RAMP,
-                 timeout: float = 600) -> Characterization | None:
+                 kv_bits: int | None = None, timeout: float = 600) -> Characterization | None:
     """Probe *model* at a few safe contexts on the GPU, then extrapolate the safe ceiling.
 
-    Returns None if the worker couldn't load/measure (e.g. the model OOMs on load)."""
+    *kv_bits* (when set) measures with a quantized KV cache. Returns None if the worker couldn't
+    load/measure (e.g. the model OOMs on load)."""
     ramp = ",".join(str(c) for c in contexts)
-    data = _run_worker(["characterize", model, ramp], timeout=timeout)
+    args = ["characterize", model, ramp]
+    if kv_bits is not None:
+        args.append(str(kv_bits))   # positional 3rd arg (worker dispatches positionally)
+    data = _run_worker(args, timeout=timeout)
     if not data or not data.get("ok"):
         return None
     points = [(int(p["context"]), float(p["used_gb"])) for p in data["points"]]

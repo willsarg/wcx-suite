@@ -81,13 +81,29 @@ def calibrate() -> dict:
     }
 
 
-def characterize(model_id: str, contexts_csv: str) -> dict:
+def _fill_kv(model, ids, kv_bits, torch) -> None:
+    """Populate the KV cache to *ids* length at the requested precision, so the VRAM read reflects
+    how it'll actually run. fp16 is a plain forward; quantized goes through ``generate`` (one step)
+    so transformers builds the quantized cache via its public ``cache_implementation`` API."""
+    from . import models
+
+    with torch.no_grad():
+        if kv_bits is None:
+            model(ids)
+        else:
+            model.generate(ids, max_new_tokens=1, do_sample=False,
+                           **models.kv_cache_kwargs(kv_bits))
+    torch.cuda.synchronize()
+
+
+def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = None) -> dict:
     """Load *model_id* on the GPU and measure total VRAM at each context in *contexts_csv*.
 
     Probes small→large; stops at the first context that errors/OOMs, keeping the safe points
     below it. Total VRAM is nvidia-smi ``used`` after a synchronized forward — it captures the
     display baseline, the CUDA context, and torch's (retained) reserved pool, so it's the
-    conservative number to compare against the wall.
+    conservative number to compare against the wall. *kv_bits_str* (when given) measures with a
+    quantized KV cache.
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -96,6 +112,7 @@ def characterize(model_id: str, contexts_csv: str) -> dict:
         return {"ok": False, "error": "CUDA not available"}
     device = torch.cuda.get_device_name(0)
     contexts = [int(c) for c in contexts_csv.split(",") if c]
+    kv_bits = int(kv_bits_str) if kv_bits_str is not None else None
     try:
         AutoTokenizer.from_pretrained(model_id)   # validate + warm the cache
         model = AutoModelForCausalLM.from_pretrained(
@@ -108,9 +125,7 @@ def characterize(model_id: str, contexts_csv: str) -> dict:
     for ctx in contexts:
         try:
             ids = torch.randint(0, int(model.config.vocab_size), (1, ctx), device="cuda")
-            with torch.no_grad():
-                model(ids)
-            torch.cuda.synchronize()
+            _fill_kv(model, ids, kv_bits, torch)
         except Exception:
             break   # OOM/error at this context — stop, keep the safe points below it
         used = _used_mb()
@@ -123,7 +138,8 @@ def characterize(model_id: str, contexts_csv: str) -> dict:
     return {"ok": True, "device": device, "model": model_id, "points": points}
 
 
-def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None) -> dict:
+def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None,
+            kv_bits_str: str | None = None) -> dict:
     """Load *model_id* on the GPU at one context and return its VRAM delta over the launch baseline.
 
     Single-context primitive ARA's driver drives (via :func:`probe.measure_once`). Refuses before
@@ -131,10 +147,13 @@ def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None) -> dic
     probing toward the wall with no backstop (RULE #1, fail-closed). Reports ``baseline_gb`` (live
     VRAM before the model loads, in this fresh process) and ``used_gb`` (after a synchronized
     forward); their difference is the model's own footprint, which ARA re-bases on the live wall.
+    *kv_bits_str* (when given) measures with a quantized KV cache, so the certified ceiling matches
+    how ``run`` will execute.
     """
     if abort_gb_str is None:
         return {"ok": False, "error": "refusing to probe without an abort limit (L5)"}
     ctx, abort_gb = int(ctx_str), float(abort_gb_str)
+    kv_bits = int(kv_bits_str) if kv_bits_str is not None else None
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -153,9 +172,7 @@ def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None) -> dic
             model_id, torch_dtype=torch.float16).to("cuda")
         model.eval()
         ids = torch.randint(0, int(model.config.vocab_size), (1, ctx), device="cuda")
-        with torch.no_grad():
-            model(ids)
-        torch.cuda.synchronize()
+        _fill_kv(model, ids, kv_bits, torch)
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 

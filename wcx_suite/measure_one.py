@@ -36,29 +36,40 @@ def _model_base_gb(info, overhead_gb: float) -> float:
     return info.weights_gb * RESIDENT_FACTOR + overhead_gb
 
 
+def _effective_kv_bits(info, kv_bits: int | None) -> int | None:
+    """The KV precision we'll actually use: the request, forced to fp16 (None) when the model's
+    cache can't be quantized (sliding-window). Mirrors the apple/wmx rule — never crash a model
+    that can't quantize; silently fall back to the safe fp16 path."""
+    return kv_bits if info.can_quantize_kv else None
+
+
 def safety_gate(info, limits, ctx: int, *, margin_gb: float, overhead_gb: float,
-                live_base: float) -> str | None:
+                live_base: float, kv_bits: int | None = None) -> str | None:
     """Return a refusal reason if probing (model, ctx) is unsafe, else None.
 
     Two independent, conservative (``>=``) refusals: the absolute base footprint must fit on its
     own (the model can load alongside whatever already uses the card), and the predicted footprint
-    at *ctx* (live baseline + model base + a-priori KV slope) must stay strictly under budget.
+    at *ctx* (live baseline + model base + a-priori KV slope) must stay strictly under budget. The
+    slope is KV-aware, so opting into quant raises the gated ceiling instead of leaving it at fp16.
     """
     threshold = limits.safe_threshold_gb(margin_gb)
     base = live_base + _model_base_gb(info, overhead_gb)
     if base >= threshold:
         return f"base estimate {base:.2f}GB >= safe budget {threshold:.2f}GB — won't load"
-    predicted = base + info.estimated_slope_gb_per_k() * (ctx / 1000)
+    slope = info.estimated_slope_gb_per_k(_effective_kv_bits(info, kv_bits))
+    predicted = base + slope * (ctx / 1000)
     if predicted >= threshold:
         return f"predicted {predicted:.2f}GB at {ctx} tok >= safe budget {threshold:.2f}GB"
     return None
 
 
-def preflight(hf_id: str, *, margin_gb: float, overhead_gb: float) -> dict:
+def preflight(hf_id: str, *, margin_gb: float, overhead_gb: float,
+              kv_bits: int | None = None) -> dict:
     """No-load estimate for ARA's scheduler: the context→0 base, a-priori slope, budget, window.
 
     ARA owns the ramp methodology but not CUDA model knowledge, so the engine supplies the facts
-    (model config + the live VRAM wall); ARA fits and solves on top.
+    (model config + the live VRAM wall); ARA fits and solves on top. The slope reflects the
+    effective KV precision (fp16 unless quant was requested and the cache supports it).
     """
     info = models.describe(hf_id)
     if info is None:
@@ -72,19 +83,20 @@ def preflight(hf_id: str, *, margin_gb: float, overhead_gb: float) -> dict:
     return {
         "base_gb": round(live_base + _model_base_gb(info, overhead_gb), 4),
         "ref_baseline_gb": round(live_base, 4),
-        "slope_gb_per_k": info.estimated_slope_gb_per_k(),
+        "slope_gb_per_k": info.estimated_slope_gb_per_k(_effective_kv_bits(info, kv_bits)),
         "budget_gb": limits.safe_threshold_gb(margin_gb),
         "max_context": info.max_context,
     }
 
 
-def _spawn_worker(hf_id: str, ctx: int, abort_gb: float) -> dict:
+def _spawn_worker(hf_id: str, ctx: int, abort_gb: float, kv_bits: int | None = None) -> dict:
     """Run the isolated GPU probe worker for one context; return its raw result dict.
 
     The worker gets the absolute safe budget as its hard abort limit, so its watchdog (L5) can
-    kill the process if live VRAM reaches it despite the pre-flight gate.
+    kill the process if live VRAM reaches it despite the pre-flight gate. *kv_bits* (already
+    resolved to the effective precision) tells the worker to measure with a quantized KV cache.
     """
-    return probe.measure_once(hf_id, ctx, abort_gb=abort_gb)
+    return probe.measure_once(hf_id, ctx, abort_gb=abort_gb, kv_bits=kv_bits)
 
 
 def _refused(ctx: int, reason: str) -> dict:
@@ -92,11 +104,13 @@ def _refused(ctx: int, reason: str) -> dict:
 
 
 def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float,
-        repeats: int = DEFAULT_REPEATS) -> dict:
+        repeats: int = DEFAULT_REPEATS, kv_bits: int | None = None) -> dict:
     """Gate then (if safe) measure; return the canonical result dict.
 
     ``mem_gb`` is the model's VRAM DELTA over its own launch baseline (``used − baseline``),
-    median over *repeats* fresh runs. ARA adds the live ref_baseline back at solve time.
+    median over *repeats* fresh runs. ARA adds the live ref_baseline back at solve time. *kv_bits*
+    (the requested KV precision) is measured AT that precision so the certified ceiling matches how
+    ``run`` will execute — never certify q4 but measure fp16 (the inconsistency we killed on MLX).
     """
     info = models.describe(hf_id)
     if info is None:
@@ -107,16 +121,17 @@ def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float,
     if limits is None:
         return _refused(ctx, "no NVIDIA GPU visible to nvidia-smi")
 
+    eff_kv_bits = _effective_kv_bits(info, kv_bits)
     live_base = limits.used_gb
     reason = safety_gate(info, limits, ctx, margin_gb=margin_gb,
-                         overhead_gb=overhead_gb, live_base=live_base)
+                         overhead_gb=overhead_gb, live_base=live_base, kv_bits=eff_kv_bits)
     if reason is not None:
         return _refused(ctx, reason)
 
     threshold = limits.safe_threshold_gb(margin_gb)
     deltas = []
     for _ in range(max(1, repeats)):
-        raw = _spawn_worker(hf_id, ctx, abort_gb=threshold)
+        raw = _spawn_worker(hf_id, ctx, abort_gb=threshold, kv_bits=eff_kv_bits)
         if raw.get("status") != "ok":
             return _refused(ctx, f"probe failed: {raw.get('note', 'no output')}")
         deltas.append(raw["used_gb"] - raw["baseline_gb"])
@@ -132,12 +147,15 @@ def main(argv=None) -> None:
     ap.add_argument("--preflight", action="store_true",
                     help="print the no-load estimate (base/slope/budget) and exit")
     ap.add_argument("--repeats", type=int, default=DEFAULT_REPEATS)
+    ap.add_argument("--kv-bits", type=int, default=None,
+                    help="quantize the KV cache to N bits (8 or 4); default fp16")
     args = ap.parse_args(argv)
     if args.preflight:
-        result = preflight(args.hf_id, margin_gb=args.margin, overhead_gb=args.overhead)
+        result = preflight(args.hf_id, margin_gb=args.margin, overhead_gb=args.overhead,
+                           kv_bits=args.kv_bits)
     else:
         result = run(args.hf_id, args.ctx, margin_gb=args.margin,
-                     overhead_gb=args.overhead, repeats=args.repeats)
+                     overhead_gb=args.overhead, repeats=args.repeats, kv_bits=args.kv_bits)
     print(json.dumps(result), flush=True)
 
 

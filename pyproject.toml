@@ -20,6 +20,7 @@ cuda = [
     "torch>=2.4",
     "transformers>=4.45",
     "nvidia-ml-py>=12",
+    "hqq>=0.2",          # KV-cache quantization backend (transformers cache_implementation="quantized")
 ]
 
 [project.scripts]

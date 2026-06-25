@@ -78,11 +78,12 @@ def _patch_engine(monkeypatch, *, info=None, limits=None, n_prompt_tokens=6,
 
     gate_seen = {}
 
-    def fake_gate(info_, limits_, ctx_, *, margin_gb, overhead_gb, live_base):
+    def fake_gate(info_, limits_, ctx_, *, margin_gb, overhead_gb, live_base, kv_bits=None):
         gate_seen["ctx"] = ctx_
         gate_seen["margin_gb"] = margin_gb
         gate_seen["overhead_gb"] = overhead_gb
         gate_seen["live_base"] = live_base
+        gate_seen["kv_bits"] = kv_bits
         return gate_reason
 
     monkeypatch.setattr(measure_one, "safety_gate", fake_gate)
@@ -106,6 +107,7 @@ def _patch_engine(monkeypatch, *, info=None, limits=None, n_prompt_tokens=6,
 
         def generate(self, input_ids=None, max_new_tokens=None, **kw):
             gate_seen["max_new_tokens"] = max_new_tokens
+            gate_seen["gen_kw"] = kw
             prompt_len = input_ids.shape[1]
             # return prompt tokens followed by max_new_tokens new ones
             return _FakeIds([list(range(prompt_len + max_new_tokens))])
@@ -136,6 +138,35 @@ def test_generate_happy_path(monkeypatch):
     assert r["context"] == 40960
     assert r["completion"] == "generated text"
     assert "refused" not in r
+
+
+# ---- KV-quant lever -----------------------------------------------------------------------
+
+def test_run_quantizes_kv_when_requested(monkeypatch):
+    seen = _patch_engine(monkeypatch)               # default model can quantize
+    generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=8,
+                 prompt="hi", kv_bits=4)
+    assert seen["kv_bits"] == 4                      # the gate saw the effective precision
+    assert seen["gen_kw"].get("cache_implementation") == "quantized"
+    assert seen["gen_kw"]["cache_config"]["nbits"] == 4
+
+
+def test_run_forces_fp16_for_non_quantizable(monkeypatch):
+    seen = _patch_engine(monkeypatch, info=_info(can_quantize_kv=False))
+    generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=8,
+                 prompt="hi", kv_bits=4)
+    assert seen["kv_bits"] is None                   # sliding-window → fp16 for gate AND generate
+    assert "cache_implementation" not in seen["gen_kw"]
+
+
+def test_main_threads_kv_bits(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(generate, "run",
+                        lambda *a, **k: seen.update(k) or {"context": a[1], "completion": "x"})
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(read=lambda: "hi"))
+    generate.main(["org/m", "2000", "--margin", "1.0", "--overhead", "0.6",
+                   "--max-tokens", "8", "--kv-bits", "8"])
+    assert seen["kv_bits"] == 8
 
 
 # ---- refusing safety gate -----------------------------------------------------------------

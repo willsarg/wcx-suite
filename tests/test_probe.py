@@ -58,6 +58,33 @@ def test_characterize_none_when_no_output(monkeypatch):
     assert probe.characterize("smol", budget_gb=7.0) is None
 
 
+def _capture_args(monkeypatch, result):
+    seen = {}
+    monkeypatch.setattr(probe, "_run_worker",
+                        lambda args, timeout=600: seen.update(args=args) or result)
+    return seen
+
+
+def test_measure_once_passes_kv_bits_positionally(monkeypatch):
+    seen = _capture_args(monkeypatch, {"ok": True, "used_gb": 4.0, "baseline_gb": 2.0})
+    probe.measure_once("m", 2000, abort_gb=7.0, kv_bits=4)
+    assert seen["args"] == ["measure", "m", "2000", "7.0", "4"]
+
+
+def test_measure_once_omits_kv_bits_for_fp16(monkeypatch):
+    seen = _capture_args(monkeypatch, {"ok": True, "used_gb": 4.0, "baseline_gb": 2.0})
+    probe.measure_once("m", 2000, abort_gb=7.0)
+    assert seen["args"] == ["measure", "m", "2000", "7.0"]
+
+
+def test_characterize_appends_kv_bits(monkeypatch):
+    seen = _capture_args(monkeypatch, {"ok": True, "device": "X",
+                                       "points": [{"context": 512, "used_gb": 2.0},
+                                                  {"context": 2048, "used_gb": 2.6}]})
+    probe.characterize("smol", budget_gb=7.0, contexts=(512, 2048), kv_bits=8)
+    assert seen["args"] == ["characterize", "smol", "512,2048", "8"]
+
+
 def test_run_worker_parses_json_line(monkeypatch):
     def fake_run(cmd, capture_output, text, timeout):
         return types.SimpleNamespace(stdout='noise\n{"ok": true, "overhead_gb": 0.5}\n',

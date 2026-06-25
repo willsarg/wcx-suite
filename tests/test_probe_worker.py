@@ -4,8 +4,44 @@
 from __future__ import annotations
 
 import json
+import types
 
 from wcx_suite import probe_worker
+
+
+class _NullCtx:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def _fake_torch():
+    return types.SimpleNamespace(no_grad=_NullCtx,
+                                 cuda=types.SimpleNamespace(synchronize=lambda: None))
+
+
+def test_fill_kv_fp16_uses_plain_forward():
+    calls = []
+
+    class M:
+        def __call__(self, ids): calls.append(("forward", ids))
+        def generate(self, *a, **k): calls.append(("generate", a, k))
+
+    probe_worker._fill_kv(M(), "IDS", None, _fake_torch())
+    assert calls == [("forward", "IDS")]            # fp16 → a plain forward, never generate
+
+
+def test_fill_kv_quant_uses_generate_with_hqq_cache():
+    calls = []
+
+    class M:
+        def __call__(self, ids): calls.append(("forward", ids))
+        def generate(self, ids, max_new_tokens=None, do_sample=None, **kw):
+            calls.append(("generate", max_new_tokens, kw))
+
+    probe_worker._fill_kv(M(), "IDS", 4, _fake_torch())
+    assert calls[0][0] == "generate" and calls[0][1] == 1
+    assert calls[0][2]["cache_implementation"] == "quantized"
+    assert calls[0][2]["cache_config"]["nbits"] == 4
 
 
 def test_worker_unknown_mode(capsys):

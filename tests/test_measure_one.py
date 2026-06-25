@@ -83,7 +83,7 @@ def test_run_measures_delta_over_launch_baseline(monkeypatch):
     _patch(monkeypatch)
     # worker reports absolute used 4.0 over a launch baseline of 2.0 → model delta 2.0
     monkeypatch.setattr(measure_one, "_spawn_worker",
-                        lambda hf, ctx, abort_gb: {"status": "ok", "used_gb": 4.0,
+                        lambda hf, ctx, abort_gb, kv_bits=None: {"status": "ok", "used_gb": 4.0,
                                                    "baseline_gb": 2.0})
     r = measure_one.run("org/m", 2000, margin_gb=1.0, overhead_gb=0.6, repeats=1)
     assert r == {"context": 2000, "mem_gb": 2.0}
@@ -93,7 +93,7 @@ def test_run_passes_safe_budget_as_abort_limit(monkeypatch):
     _patch(monkeypatch)
     seen = {}
 
-    def spy(hf, ctx, abort_gb):
+    def spy(hf, ctx, abort_gb, kv_bits=None):
         seen["abort_gb"] = abort_gb
         return {"status": "ok", "used_gb": 3.0, "baseline_gb": 2.0}
 
@@ -106,7 +106,7 @@ def test_run_median_over_repeats(monkeypatch):
     _patch(monkeypatch)
     deltas = iter([2.0, 5.0, 2.2])          # median delta = 2.2
     monkeypatch.setattr(measure_one, "_spawn_worker",
-                        lambda hf, ctx, abort_gb: {"status": "ok",
+                        lambda hf, ctx, abort_gb, kv_bits=None: {"status": "ok",
                                                    "used_gb": 2.0 + next(deltas), "baseline_gb": 2.0})
     r = measure_one.run("org/m", 2000, margin_gb=1.0, overhead_gb=0.6, repeats=3)
     assert r["mem_gb"] == 2.2
@@ -115,7 +115,7 @@ def test_run_median_over_repeats(monkeypatch):
 def test_run_refused_when_worker_not_ok(monkeypatch):
     _patch(monkeypatch)
     monkeypatch.setattr(measure_one, "_spawn_worker",
-                        lambda hf, ctx, abort_gb: {"status": "error", "note": "OOM"})
+                        lambda hf, ctx, abort_gb, kv_bits=None: {"status": "error", "note": "OOM"})
     r = measure_one.run("org/m", 2000, margin_gb=1.0, overhead_gb=0.6)
     assert r["refused"] is True and "OOM" in r["reason"]
 
@@ -124,6 +124,67 @@ def test_run_refused_when_model_missing(monkeypatch):
     monkeypatch.setattr(models, "describe", lambda hf: None)
     r = measure_one.run("missing/m", 2000, margin_gb=1.0, overhead_gb=0.6)
     assert r["refused"] is True
+
+
+# ---- KV-quant lever -----------------------------------------------------------------------
+
+def test_effective_kv_bits_forced_fp16_when_not_quantizable():
+    assert measure_one._effective_kv_bits(_info(can_quantize_kv=True), 4) == 4
+    assert measure_one._effective_kv_bits(_info(can_quantize_kv=False), 4) is None
+    assert measure_one._effective_kv_bits(_info(can_quantize_kv=True), None) is None
+
+
+def test_run_measures_at_requested_kv_bits(monkeypatch):
+    _patch(monkeypatch)                                     # default model can quantize
+    seen = {}
+
+    def spy(hf, ctx, abort_gb, kv_bits=None):
+        seen["kv_bits"] = kv_bits
+        return {"status": "ok", "used_gb": 4.0, "baseline_gb": 2.0}
+
+    monkeypatch.setattr(measure_one, "_spawn_worker", spy)
+    measure_one.run("org/m", 2000, margin_gb=1.0, overhead_gb=0.6, repeats=1, kv_bits=4)
+    assert seen["kv_bits"] == 4            # certified at the precision run will use
+
+
+def test_run_forces_fp16_for_non_quantizable_model(monkeypatch):
+    _patch(monkeypatch, info=_info(can_quantize_kv=False))
+    seen = {}
+
+    def spy(hf, ctx, abort_gb, kv_bits=None):
+        seen["kv_bits"] = kv_bits
+        return {"status": "ok", "used_gb": 4.0, "baseline_gb": 2.0}
+
+    monkeypatch.setattr(measure_one, "_spawn_worker", spy)
+    measure_one.run("org/m", 2000, margin_gb=1.0, overhead_gb=0.6, repeats=1, kv_bits=4)
+    assert seen["kv_bits"] is None        # sliding-window cache → never quantized
+
+
+def test_gate_slope_is_kv_aware(monkeypatch):
+    _patch(monkeypatch)
+    info, limits = _info(), _limits()
+    # quant lowers the predicted footprint, so a context that the fp16 gate refuses can pass at q4
+    fp16 = measure_one.safety_gate(info, limits, 200000, margin_gb=1.0, overhead_gb=0.6,
+                                   live_base=2.0, kv_bits=None)
+    q4 = measure_one.safety_gate(info, limits, 200000, margin_gb=1.0, overhead_gb=0.6,
+                                 live_base=2.0, kv_bits=4)
+    assert fp16 is not None and q4 is None
+
+
+def test_preflight_slope_reflects_kv_bits(monkeypatch):
+    _patch(monkeypatch)
+    f16 = measure_one.preflight("org/m", margin_gb=1.0, overhead_gb=0.6)["slope_gb_per_k"]
+    q4 = measure_one.preflight("org/m", margin_gb=1.0, overhead_gb=0.6, kv_bits=4)["slope_gb_per_k"]
+    assert q4 < f16
+
+
+def test_main_threads_kv_bits(monkeypatch):
+    _patch(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(measure_one, "run",
+                        lambda *a, **k: seen.update(k) or {"context": a[1], "mem_gb": 1.0})
+    measure_one.main(["org/m", "2000", "--margin", "1.0", "--overhead", "0.6", "--kv-bits", "8"])
+    assert seen["kv_bits"] == 8
 
 
 # ---- main ---------------------------------------------------------------------------------
@@ -137,6 +198,6 @@ def test_main_preflight_prints_estimate(monkeypatch, capsys):
 def test_main_measure_prints_result(monkeypatch, capsys):
     _patch(monkeypatch)
     monkeypatch.setattr(measure_one, "_spawn_worker",
-                        lambda hf, ctx, abort_gb: {"status": "ok", "used_gb": 4.0, "baseline_gb": 2.0})
+                        lambda hf, ctx, abort_gb, kv_bits=None: {"status": "ok", "used_gb": 4.0, "baseline_gb": 2.0})
     measure_one.main(["org/m", "2000", "--margin", "1.0", "--overhead", "0.6", "--repeats", "1"])
     assert json.loads(capsys.readouterr().out.strip())["context"] == 2000

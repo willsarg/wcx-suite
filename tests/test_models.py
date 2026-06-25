@@ -77,6 +77,27 @@ def test_kv_slope_uses_binary_gib_not_decimal_gb(tmp_path, monkeypatch):
     assert info.estimated_slope_gb_per_k() < decimal_gb
 
 
+def test_kv_bytes_and_slope_are_quant_aware(tmp_path, monkeypatch):
+    monkeypatch.setattr(models, "HUB", str(tmp_path))
+    _make_model(tmp_path, "org/smol", _LLAMA)
+    info = models.describe("org/smol")
+    elems = 30 * 3 * 64 * 2                                   # layers × kv_heads × head_dim × (K,V)
+    assert info.kv_bytes_per_token(None) == elems * 2.0       # fp16
+    assert info.kv_bytes_per_token(8) == elems * (8 / 8 + 2 * 2 / models.KV_GROUP_SIZE)   # 1.0625
+    assert info.kv_bytes_per_token(4) == elems * (4 / 8 + 2 * 2 / models.KV_GROUP_SIZE)   # 0.5625
+    # opting into quant lowers the slope → a higher gated ceiling (the slope-bug lesson)
+    assert info.estimated_slope_gb_per_k(4) < info.estimated_slope_gb_per_k(8) \
+        < info.estimated_slope_gb_per_k(None)
+
+
+def test_kv_cache_kwargs_fp16_empty_quant_uses_hqq():
+    assert models.kv_cache_kwargs(None) == {}
+    kw = models.kv_cache_kwargs(4)
+    assert kw["cache_implementation"] == "quantized"
+    assert kw["cache_config"] == {"backend": "HQQ", "nbits": 4,
+                                  "q_group_size": models.KV_GROUP_SIZE}
+
+
 def test_head_dim_falls_back_to_hidden_over_heads(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "HUB", str(tmp_path))
     cfg = {**_LLAMA}

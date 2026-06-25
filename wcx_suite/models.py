@@ -32,6 +32,24 @@ PREFILL_SPIKE_MULT = 2.0
 # slope — a ~7.37% dimensional error (Rule #1/#3). The mirror of project-ara's ramp.py GIB fix.
 GIB = 1024 ** 3
 
+# KV-cache quantization (opt-in; fp16 is the default everywhere). transformers quantizes the cache
+# in groups of KV_GROUP_SIZE elements, each group carrying an fp16 scale + zero (2 bytes each), so
+# the effective bytes/elem is kv_bits/8 + 2·2/group — the same scheme MLX uses. HQQ is the backend
+# (it supports both 8- and 4-bit, unlike quanto's 2/4-only KV path), so q8_0 and q4_0 both work.
+KV_GROUP_SIZE = 64
+
+
+def kv_cache_kwargs(kv_bits: int | None) -> dict:
+    """``model.generate`` kwargs that quantize the KV cache at *kv_bits*, or ``{}`` for fp16.
+
+    Uses transformers' public generate-time cache API (``cache_implementation="quantized"`` + a
+    ``cache_config`` dict) rather than constructing a cache class, so it's stable across versions.
+    Validated live on a real GPU (willw11)."""
+    if kv_bits is None:
+        return {}
+    return {"cache_implementation": "quantized",
+            "cache_config": {"backend": "HQQ", "nbits": kv_bits, "q_group_size": KV_GROUP_SIZE}}
+
 
 @dataclass
 class ModelInfo:
@@ -46,16 +64,26 @@ class ModelInfo:
     can_quantize_kv: bool        # False => sliding-window model, keep fp16 KV
     is_causal: bool = True
 
-    def fp16_kv_bytes_per_token(self) -> float:
-        """Analytic fp16 KV-cache growth per token (K and V), counting only growing layers."""
+    def kv_bytes_per_token(self, kv_bits: int | None = None) -> float:
+        """Analytic KV-cache growth per token (K and V), counting only growing layers.
+
+        fp16 (``kv_bits=None``) is 2 bytes/elem; quantized is ``kv_bits/8`` plus the group
+        scale+zero overhead (see KV_GROUP_SIZE) — so opting into quant lowers the slope, raising
+        the gated ceiling (the slope-bug lesson: the a-priori gate must know the cache shrank)."""
         if not (self.kv_heads and self.head_dim):
             return 0.0
-        return self.growing_layers * self.kv_heads * self.head_dim * 2 * 2  # 2=(K,V), 2 bytes fp16
+        elems = self.growing_layers * self.kv_heads * self.head_dim * 2  # 2 = K and V
+        bytes_per_elem = 2.0 if kv_bits is None else kv_bits / 8 + 2 * 2 / KV_GROUP_SIZE
+        return elems * bytes_per_elem
 
-    def estimated_slope_gb_per_k(self) -> float:
-        """Conservative VRAM slope (binary GiB per 1k tokens) for an UNcharacterized model: fp16 KV
-        growth scaled by the prefill-spike factor. GiB to match the wall (see the GIB note)."""
-        return self.fp16_kv_bytes_per_token() * 1000 / GIB * PREFILL_SPIKE_MULT
+    def fp16_kv_bytes_per_token(self) -> float:
+        """fp16 KV-cache growth per token — the default precision."""
+        return self.kv_bytes_per_token(None)
+
+    def estimated_slope_gb_per_k(self, kv_bits: int | None = None) -> float:
+        """Conservative VRAM slope (binary GiB per 1k tokens) for an UNcharacterized model: KV
+        growth at *kv_bits* scaled by the prefill-spike factor. GiB to match the wall (GIB note)."""
+        return self.kv_bytes_per_token(kv_bits) * 1000 / GIB * PREFILL_SPIKE_MULT
 
 
 def _cache_dir(hf_id: str) -> str:

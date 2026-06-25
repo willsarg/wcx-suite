@@ -43,8 +43,11 @@ def _count_prompt_tokens(hf_id: str, prompt: str) -> int:
     return len(AutoTokenizer.from_pretrained(hf_id).encode(prompt))
 
 
-def _generate(hf_id: str, prompt: str, max_tokens: int) -> str:
-    """Load *hf_id* on CUDA, generate up to *max_tokens* new tokens, return the NEW text only."""
+def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = None) -> str:
+    """Load *hf_id* on CUDA, generate up to *max_tokens* new tokens, return the NEW text only.
+
+    *kv_bits* (when set) quantizes the KV cache during generation — the same precision the ceiling
+    was certified at, so the run executes exactly as characterized."""
     import torch                                            # lazy (NVIDIA-only [cuda] extra)
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -56,17 +59,20 @@ def _generate(hf_id: str, prompt: str, max_tokens: int) -> str:
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
     prompt_len = inputs.input_ids.shape[1]
     with torch.no_grad():
-        out = model.generate(input_ids=inputs.input_ids, max_new_tokens=max_tokens)
+        out = model.generate(input_ids=inputs.input_ids, max_new_tokens=max_tokens,
+                             **models.kv_cache_kwargs(kv_bits))
     new_tokens = out[0][prompt_len:]                         # decode only the newly generated span
     return tokenizer.decode(new_tokens, skip_special_tokens=True)
 
 
 def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float, max_tokens: int,
-        prompt: str = "") -> dict:
+        prompt: str = "", kv_bits: int | None = None) -> dict:
     """Gate on the effective context, then (if safe) load + generate. Returns the result dict.
 
     The refusal/success both report the ceiling *ctx* (consistent with the wmx verb and the cpu
-    worker), even though the gate is evaluated against the smaller effective context.
+    worker), even though the gate is evaluated against the smaller effective context. *kv_bits* is
+    resolved to the effective precision (fp16 unless quant was requested and the cache supports it)
+    and used for BOTH the gate's a-priori slope and the actual generation, so they never disagree.
     """
     info = models.describe(hf_id)
     if info is None:
@@ -77,17 +83,19 @@ def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float, max_token
     if limits is None:
         return _refused(ctx, "no NVIDIA GPU visible to nvidia-smi")
 
+    eff_kv_bits = measure_one._effective_kv_bits(info, kv_bits)
     # A one-shot only reaches prompt + new tokens of context; never gate the raw ceiling.
     prompt_tokens = _count_prompt_tokens(hf_id, prompt)
     effective_ctx = min(ctx, prompt_tokens + max_tokens)
 
     live_base = limits.used_gb              # mirrors measure_one.run's exact call site
     reason = measure_one.safety_gate(info, limits, effective_ctx, margin_gb=margin_gb,
-                                     overhead_gb=overhead_gb, live_base=live_base)
+                                     overhead_gb=overhead_gb, live_base=live_base,
+                                     kv_bits=eff_kv_bits)
     if reason is not None:
         return _refused(ctx, reason)        # report the ceiling, not the effective ctx
 
-    completion = _generate(hf_id, prompt, max_tokens)
+    completion = _generate(hf_id, prompt, max_tokens, eff_kv_bits)
     return {"context": ctx, "completion": completion}
 
 
@@ -98,10 +106,12 @@ def main(argv=None) -> None:
     ap.add_argument("--margin", type=float, required=True)
     ap.add_argument("--overhead", type=float, required=True)
     ap.add_argument("--max-tokens", type=int, required=True)
+    ap.add_argument("--kv-bits", type=int, default=None,
+                    help="quantize the KV cache to N bits (8 or 4); default fp16")
     args = ap.parse_args(argv)
     prompt = sys.stdin.read()               # PROMPT comes from stdin, never argv
     result = run(args.hf_id, args.ctx, margin_gb=args.margin, overhead_gb=args.overhead,
-                 max_tokens=args.max_tokens, prompt=prompt)
+                 max_tokens=args.max_tokens, prompt=prompt, kv_bits=args.kv_bits)
     print(json.dumps(result), flush=True)
 
 
