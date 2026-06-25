@@ -34,8 +34,8 @@ GIB = 1024 ** 3
 
 # KV-cache quantization (opt-in; fp16 is the default everywhere). transformers quantizes the cache
 # in groups of KV_GROUP_SIZE elements, each group carrying an fp16 scale + zero (2 bytes each), so
-# the effective bytes/elem is kv_bits/8 + 2·2/group — the same scheme MLX uses. HQQ is the backend
-# (it supports both 8- and 4-bit, unlike quanto's 2/4-only KV path), so q8_0 and q4_0 both work.
+# the effective bytes/elem is kv_bits/8 + 2·2/group — the same scheme MLX uses. The `hqq` backend
+# does both 8- and 4-bit (unlike quanto's 2/4-only KV path), so q8_0 and q4_0 both work.
 KV_GROUP_SIZE = 64
 
 
@@ -43,12 +43,12 @@ def kv_cache_kwargs(kv_bits: int | None) -> dict:
     """``model.generate`` kwargs that quantize the KV cache at *kv_bits*, or ``{}`` for fp16.
 
     Uses transformers' public generate-time cache API (``cache_implementation="quantized"`` + a
-    ``cache_config`` dict) rather than constructing a cache class, so it's stable across versions.
-    Validated live on a real GPU (willw11)."""
+    ``cache_config`` dict) rather than constructing a cache class. The backend string is the
+    lowercase ``"hqq"`` transformers expects (verified live against transformers 5.x on willw11)."""
     if kv_bits is None:
         return {}
     return {"cache_implementation": "quantized",
-            "cache_config": {"backend": "HQQ", "nbits": kv_bits, "q_group_size": KV_GROUP_SIZE}}
+            "cache_config": {"backend": "hqq", "nbits": kv_bits, "q_group_size": KV_GROUP_SIZE}}
 
 
 @dataclass

@@ -94,7 +94,7 @@ def test_kv_cache_kwargs_fp16_empty_quant_uses_hqq():
     assert models.kv_cache_kwargs(None) == {}
     kw = models.kv_cache_kwargs(4)
     assert kw["cache_implementation"] == "quantized"
-    assert kw["cache_config"] == {"backend": "HQQ", "nbits": 4,
+    assert kw["cache_config"] == {"backend": "hqq", "nbits": 4,
                                   "q_group_size": models.KV_GROUP_SIZE}
 
 
