@@ -80,6 +80,38 @@ def test_native_matches_nvidia_smi_on_real_gpu():
     assert abs(mem.total / (1024 ** 3) - smi.total_gb) < 0.1
 
 
+def test_flash_attn_capable_true_when_package_and_ampere(monkeypatch):
+    import importlib.util
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda n: object() if n == "flash_attn" else None)
+    monkeypatch.setattr(system, "_pynvml", lambda: types.SimpleNamespace(
+        nvmlDeviceGetCudaComputeCapability=lambda h: (8, 6)), raising=False)
+    monkeypatch.setattr(system, "_nvml_handle", lambda: object(), raising=False)
+    assert system.flash_attn_capable() is True
+
+
+def test_flash_attn_capable_false_without_package(monkeypatch):
+    import importlib.util
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n: None)
+    assert system.flash_attn_capable() is False
+
+
+def test_flash_attn_capable_false_on_pre_ampere(monkeypatch):
+    import importlib.util
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n: object())
+    monkeypatch.setattr(system, "_pynvml", lambda: types.SimpleNamespace(
+        nvmlDeviceGetCudaComputeCapability=lambda h: (7, 5)), raising=False)   # Turing (RTX 2070)
+    monkeypatch.setattr(system, "_nvml_handle", lambda: object(), raising=False)
+    assert system.flash_attn_capable() is False
+
+
+def test_flash_attn_capable_false_when_nvml_errors(monkeypatch):
+    import importlib.util
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n: object())
+    # autouse _no_pynvml makes _pynvml raise → can't read capability → conservatively False
+    assert system.flash_attn_capable() is False
+
+
 def test_read_limits_parses_nvidia_smi(monkeypatch):
     monkeypatch.setattr(system, "_smi_query",
                         lambda: "NVIDIA GeForce RTX 2070, 8192, 1024, 7168\n")

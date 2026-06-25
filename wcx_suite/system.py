@@ -130,3 +130,22 @@ def read_limits() -> GPULimits | None:
     except Exception:
         return _read_limits_smi()
     return lim if _plausible_gb(lim.total_gb) else _read_limits_smi()
+
+
+# FlashAttention-2 needs an Ampere+ GPU (compute capability ≥ 8.0) AND the compiled flash_attn
+# package. SDPA is the always-available fused fallback, so FA2 stays an availability-gated opt-in.
+_FA2_MIN_MAJOR = 8
+
+
+def flash_attn_capable() -> bool:
+    """True only if this GPU can run FlashAttention-2: arch ≥ Ampere (sm_80) AND ``flash_attn`` is
+    importable. Read via NVML (no torch import). Conservatively False if either can't be confirmed
+    — better to fall back to SDPA than to claim an unsupported path."""
+    import importlib.util
+    if importlib.util.find_spec("flash_attn") is None:
+        return False
+    try:
+        major, _ = _pynvml().nvmlDeviceGetCudaComputeCapability(_nvml_handle())
+    except Exception:
+        return False
+    return major >= _FA2_MIN_MAJOR

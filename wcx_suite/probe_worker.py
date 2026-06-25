@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from . import system
+from . import models, system
 
 WATCHDOG_INTERVAL_S = 0.25   # how often the L5 watchdog re-reads live VRAM
 
@@ -96,14 +96,15 @@ def _fill_kv(model, ids, kv_bits, torch) -> None:
     torch.cuda.synchronize()
 
 
-def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = None) -> dict:
+def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = None, *,
+                 prefer_flash: bool = False) -> dict:
     """Load *model_id* on the GPU and measure total VRAM at each context in *contexts_csv*.
 
     Probes small→large; stops at the first context that errors/OOMs, keeping the safe points
     below it. Total VRAM is nvidia-smi ``used`` after a synchronized forward — it captures the
     display baseline, the CUDA context, and torch's (retained) reserved pool, so it's the
     conservative number to compare against the wall. *kv_bits_str* (when given) measures with a
-    quantized KV cache.
+    quantized KV cache; *prefer_flash* opts into FlashAttention-2 (else SDPA).
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -116,7 +117,8 @@ def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = Non
     try:
         AutoTokenizer.from_pretrained(model_id)   # validate + warm the cache
         model = AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=torch.float16).to("cuda")
+            model_id, torch_dtype=torch.float16,
+            attn_implementation=models.attn_implementation(prefer_flash)).to("cuda")
         model.eval()
     except Exception as exc:
         return {"ok": False, "error": f"load failed: {type(exc).__name__}: {exc}"}
@@ -139,7 +141,7 @@ def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = Non
 
 
 def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None,
-            kv_bits_str: str | None = None) -> dict:
+            kv_bits_str: str | None = None, *, prefer_flash: bool = False) -> dict:
     """Load *model_id* on the GPU at one context and return its VRAM delta over the launch baseline.
 
     Single-context primitive ARA's driver drives (via :func:`probe.measure_once`). Refuses before
@@ -148,7 +150,7 @@ def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None,
     VRAM before the model loads, in this fresh process) and ``used_gb`` (after a synchronized
     forward); their difference is the model's own footprint, which ARA re-bases on the live wall.
     *kv_bits_str* (when given) measures with a quantized KV cache, so the certified ceiling matches
-    how ``run`` will execute.
+    how ``run`` will execute; *prefer_flash* opts into FlashAttention-2 (else SDPA).
     """
     if abort_gb_str is None:
         return {"ok": False, "error": "refusing to probe without an abort limit (L5)"}
@@ -169,7 +171,8 @@ def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None,
     try:
         AutoTokenizer.from_pretrained(model_id)
         model = AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=torch.float16).to("cuda")
+            model_id, torch_dtype=torch.float16,
+            attn_implementation=models.attn_implementation(prefer_flash)).to("cuda")
         model.eval()
         ids = torch.randint(0, int(model.config.vocab_size), (1, ctx), device="cuda")
         _fill_kv(model, ids, kv_bits, torch)
@@ -192,8 +195,12 @@ def main(argv: list[str] | None = None) -> int:
     if fn is None:
         result: dict = {"ok": False, "error": f"unknown mode: {mode!r}"}
     else:
+        # --flash-attn is a named flag (stripped to a kwarg) so it never collides with the
+        # conditional positional kv_bits; everything else stays positional.
+        rest = [a for a in argv[1:] if a != "--flash-attn"]
+        kwargs = {"prefer_flash": True} if "--flash-attn" in argv[1:] else {}
         try:
-            result = fn(*argv[1:])
+            result = fn(*rest, **kwargs)
         except Exception as exc:   # never let a GPU fault escape as a traceback
             result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     print(json.dumps(result))

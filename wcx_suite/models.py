@@ -39,6 +39,15 @@ GIB = 1024 ** 3
 KV_GROUP_SIZE = 64
 
 
+def attn_implementation(prefer_flash: bool) -> str:
+    """The transformers ``attn_implementation`` to load with. SDPA (always available, fused) is the
+    default; FlashAttention-2 is used ONLY when the user opted in AND the GPU+package support it
+    (see :func:`system.flash_attn_capable`). An opt-in on unsupported hardware falls back to SDPA,
+    never crashes — the honest, availability-gated behaviour."""
+    from . import system
+    return "flash_attention_2" if (prefer_flash and system.flash_attn_capable()) else "sdpa"
+
+
 def kv_cache_kwargs(kv_bits: int | None) -> dict:
     """``model.generate`` kwargs that quantize the KV cache at *kv_bits*, or ``{}`` for fp16.
 

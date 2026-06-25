@@ -68,7 +68,7 @@ def _run_worker(args: list[str], timeout: float = 120) -> dict | None:
 
 
 def measure_once(hf_id: str, ctx: int, *, abort_gb: float, kv_bits: int | None = None,
-                 timeout: float = 600) -> dict:
+                 prefer_flash: bool = False, timeout: float = 600) -> dict:
     """Probe *hf_id* at one context in the isolated GPU worker; normalise to the driver shape.
 
     The worker speaks ``{ok, ...}``; ARA's :mod:`wcx_suite.measure_one` (and the wmx contract it
@@ -77,10 +77,13 @@ def measure_once(hf_id: str, ctx: int, *, abort_gb: float, kv_bits: int | None =
     VRAM reach. *kv_bits* (when set) measures with a quantized KV cache. Returns
     ``{status: "ok", used_gb, baseline_gb}`` or ``{status: "error", note}``.
     """
-    # probe_worker dispatches positionally (fn(*argv[1:])), so kv_bits rides as a 4th positional.
+    # probe_worker dispatches positionally (fn(*argv[1:])), so kv_bits rides as a 4th positional;
+    # --flash-attn is a named flag the worker strips (so it never shifts the kv_bits position).
     args = ["measure", hf_id, str(ctx), str(abort_gb)]
     if kv_bits is not None:
         args.append(str(kv_bits))
+    if prefer_flash:
+        args.append("--flash-attn")
     data = _run_worker(args, timeout=timeout)
     if data is None:
         return {"status": "error", "note": "no output from probe worker"}
@@ -113,15 +116,18 @@ class Characterization:
 
 def characterize(model: str, *, budget_gb: float,
                  contexts: tuple[int, ...] = DEFAULT_RAMP,
-                 kv_bits: int | None = None, timeout: float = 600) -> Characterization | None:
+                 kv_bits: int | None = None, prefer_flash: bool = False,
+                 timeout: float = 600) -> Characterization | None:
     """Probe *model* at a few safe contexts on the GPU, then extrapolate the safe ceiling.
 
-    *kv_bits* (when set) measures with a quantized KV cache. Returns None if the worker couldn't
-    load/measure (e.g. the model OOMs on load)."""
+    *kv_bits* (when set) measures with a quantized KV cache; *prefer_flash* opts into
+    FlashAttention-2. Returns None if the worker couldn't load/measure (e.g. the model OOMs)."""
     ramp = ",".join(str(c) for c in contexts)
     args = ["characterize", model, ramp]
     if kv_bits is not None:
         args.append(str(kv_bits))   # positional 3rd arg (worker dispatches positionally)
+    if prefer_flash:
+        args.append("--flash-attn")
     data = _run_worker(args, timeout=timeout)
     if not data or not data.get("ok"):
         return None

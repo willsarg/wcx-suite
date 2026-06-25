@@ -90,6 +90,15 @@ def test_kv_bytes_and_slope_are_quant_aware(tmp_path, monkeypatch):
         < info.estimated_slope_gb_per_k(None)
 
 
+def test_attn_implementation_sdpa_default_and_availability_gated(monkeypatch):
+    from wcx_suite import system
+    monkeypatch.setattr(system, "flash_attn_capable", lambda: True)
+    assert models.attn_implementation(False) == "sdpa"               # not opted in → SDPA
+    assert models.attn_implementation(True) == "flash_attention_2"   # opted in + capable → FA2
+    monkeypatch.setattr(system, "flash_attn_capable", lambda: False)
+    assert models.attn_implementation(True) == "sdpa"                # opted in but incapable → SDPA
+
+
 def test_kv_cache_kwargs_fp16_empty_quant_uses_hqq():
     assert models.kv_cache_kwargs(None) == {}
     kw = models.kv_cache_kwargs(4)

@@ -42,6 +42,9 @@ def limits(margin_gb: float | None = None) -> dict:
         "margin_gb": margin,
         "headroom_gb": safe - s.used_gb,
         "swap_free_gb": None,
+        # Can this GPU run FlashAttention-2 (Ampere+ and the package present)? Lets ARA tell the
+        # user upfront when a --flash-attn opt-in will fall back to SDPA. Cheap (NVML, no torch).
+        "flash_attn_capable": system.flash_attn_capable(),
     }
 
 

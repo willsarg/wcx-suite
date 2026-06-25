@@ -56,6 +56,23 @@ def test_worker_no_mode(capsys):
     assert rc == 1 and out["ok"] is False
 
 
+def test_main_strips_flash_attn_into_prefer_flash_kwarg(monkeypatch, capsys):
+    seen = {}
+    monkeypatch.setitem(probe_worker._MODES, "fake",
+                        lambda *a, **k: seen.update(args=a, kw=k) or {"ok": True})
+    probe_worker.main(["fake", "model", "--flash-attn", "2000"])
+    # --flash-attn becomes a kwarg; the remaining args stay positional (never shifts kv_bits)
+    assert seen["kw"] == {"prefer_flash": True} and seen["args"] == ("model", "2000")
+
+
+def test_main_no_flash_attn_means_no_prefer_kwarg(monkeypatch, capsys):
+    seen = {}
+    monkeypatch.setitem(probe_worker._MODES, "fake",
+                        lambda *a, **k: seen.update(kw=k) or {"ok": True})
+    probe_worker.main(["fake", "model"])
+    assert seen["kw"] == {}
+
+
 def test_worker_runs_mode_and_emits_json(monkeypatch, capsys):
     monkeypatch.setitem(probe_worker._MODES, "fake", lambda: {"ok": True, "x": 1})
     rc = probe_worker.main(["fake"])

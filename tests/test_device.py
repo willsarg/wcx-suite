@@ -25,6 +25,12 @@ def test_limits_returns_engine_facts(monkeypatch):
     assert m["swap_free_gb"] is None           # VRAM has no swap
 
 
+def test_limits_reports_flash_attn_capability(monkeypatch):
+    _fake_limits(monkeypatch)
+    monkeypatch.setattr(system, "flash_attn_capable", lambda: True)
+    assert device.limits(margin_gb=1.0)["flash_attn_capable"] is True
+
+
 def test_limits_error_when_no_gpu(monkeypatch):
     monkeypatch.setattr(system, "read_limits", lambda: None)
     assert device.limits() == {"error": "no NVIDIA GPU visible to nvidia-smi"}

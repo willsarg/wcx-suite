@@ -77,6 +77,15 @@ def test_measure_once_omits_kv_bits_for_fp16(monkeypatch):
     assert seen["args"] == ["measure", "m", "2000", "7.0"]
 
 
+def test_measure_once_appends_flash_attn(monkeypatch):
+    seen = _capture_args(monkeypatch, {"ok": True, "used_gb": 4.0, "baseline_gb": 2.0})
+    probe.measure_once("m", 2000, abort_gb=7.0, prefer_flash=True)
+    assert "--flash-attn" in seen["args"]
+    seen2 = _capture_args(monkeypatch, {"ok": True, "used_gb": 4.0, "baseline_gb": 2.0})
+    probe.measure_once("m", 2000, abort_gb=7.0)
+    assert "--flash-attn" not in seen2["args"]          # SDPA default
+
+
 def test_characterize_appends_kv_bits(monkeypatch):
     seen = _capture_args(monkeypatch, {"ok": True, "device": "X",
                                        "points": [{"context": 512, "used_gb": 2.0},

@@ -169,6 +169,26 @@ def test_main_threads_kv_bits(monkeypatch):
     assert seen["kv_bits"] == 8
 
 
+def test_run_threads_prefer_flash_to_generate(monkeypatch):
+    _patch_engine(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(generate, "_generate",
+                        lambda hf, p, mt, kv=None, pf=False: seen.update(pf=pf) or "out")
+    generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=8,
+                 prompt="hi", prefer_flash=True)
+    assert seen["pf"] is True
+
+
+def test_main_threads_flash_attn(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(generate, "run",
+                        lambda *a, **k: seen.update(k) or {"context": a[1], "completion": "x"})
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(read=lambda: "hi"))
+    generate.main(["org/m", "2000", "--margin", "1.0", "--overhead", "0.6",
+                   "--max-tokens", "8", "--flash-attn"])
+    assert seen["prefer_flash"] is True
+
+
 # ---- refusing safety gate -----------------------------------------------------------------
 
 def test_generate_refused_by_safety_gate(monkeypatch):

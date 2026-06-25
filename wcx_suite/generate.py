@@ -43,17 +43,20 @@ def _count_prompt_tokens(hf_id: str, prompt: str) -> int:
     return len(AutoTokenizer.from_pretrained(hf_id).encode(prompt))
 
 
-def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = None) -> str:
+def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = None,
+              prefer_flash: bool = False) -> str:
     """Load *hf_id* on CUDA, generate up to *max_tokens* new tokens, return the NEW text only.
 
     *kv_bits* (when set) quantizes the KV cache during generation — the same precision the ceiling
-    was certified at, so the run executes exactly as characterized."""
+    was certified at, so the run executes exactly as characterized; *prefer_flash* opts into
+    FlashAttention-2 (else SDPA), matching characterize."""
     import torch                                            # lazy (NVIDIA-only [cuda] extra)
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(hf_id)
     model = AutoModelForCausalLM.from_pretrained(
-        hf_id, torch_dtype=torch.float16).to("cuda")        # mirror probe_worker's load
+        hf_id, torch_dtype=torch.float16,                   # mirror probe_worker's load
+        attn_implementation=models.attn_implementation(prefer_flash)).to("cuda")
     model.eval()
 
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
@@ -66,7 +69,7 @@ def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = No
 
 
 def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float, max_tokens: int,
-        prompt: str = "", kv_bits: int | None = None) -> dict:
+        prompt: str = "", kv_bits: int | None = None, prefer_flash: bool = False) -> dict:
     """Gate on the effective context, then (if safe) load + generate. Returns the result dict.
 
     The refusal/success both report the ceiling *ctx* (consistent with the wmx verb and the cpu
@@ -95,7 +98,7 @@ def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float, max_token
     if reason is not None:
         return _refused(ctx, reason)        # report the ceiling, not the effective ctx
 
-    completion = _generate(hf_id, prompt, max_tokens, eff_kv_bits)
+    completion = _generate(hf_id, prompt, max_tokens, eff_kv_bits, prefer_flash)
     return {"context": ctx, "completion": completion}
 
 
@@ -108,10 +111,13 @@ def main(argv=None) -> None:
     ap.add_argument("--max-tokens", type=int, required=True)
     ap.add_argument("--kv-bits", type=int, default=None,
                     help="quantize the KV cache to N bits (8 or 4); default fp16")
+    ap.add_argument("--flash-attn", action="store_true",
+                    help="opt into FlashAttention-2 (Ampere+ only; else falls back to SDPA)")
     args = ap.parse_args(argv)
     prompt = sys.stdin.read()               # PROMPT comes from stdin, never argv
     result = run(args.hf_id, args.ctx, margin_gb=args.margin, overhead_gb=args.overhead,
-                 max_tokens=args.max_tokens, prompt=prompt, kv_bits=args.kv_bits)
+                 max_tokens=args.max_tokens, prompt=prompt, kv_bits=args.kv_bits,
+                 prefer_flash=args.flash_attn)
     print(json.dumps(result), flush=True)
 
 
