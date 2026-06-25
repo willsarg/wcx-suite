@@ -45,6 +45,8 @@ def limits(margin_gb: float | None = None) -> dict:
         # Can this GPU run FlashAttention-2 (Ampere+ and the package present)? Lets ARA tell the
         # user upfront when a --flash-attn opt-in will fall back to SDPA. Cheap (NVML, no torch).
         "flash_attn_capable": system.flash_attn_capable(),
+        # Hardware FP8 (Ada/Hopper, sm_89+) — lets ARA reject --weight-quant fp8 on older GPUs.
+        "fp8_capable": system.fp8_capable(),
     }
 
 

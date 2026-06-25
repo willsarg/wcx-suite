@@ -149,3 +149,17 @@ def flash_attn_capable() -> bool:
     except Exception:
         return False
     return major >= _FA2_MIN_MAJOR
+
+
+# Hardware FP8 (E4M3) needs Ada (sm_89) or Hopper (sm_90); pre-Ada GPUs can't load FP8 weights.
+_FP8_MIN_CC = (8, 9)
+
+
+def fp8_capable() -> bool:
+    """True only if this GPU has hardware FP8 (compute capability ≥ sm_89). NVML, no torch.
+    Conservatively False if it can't be read — FP8 is then rejected rather than crashed."""
+    try:
+        cc = tuple(_pynvml().nvmlDeviceGetCudaComputeCapability(_nvml_handle()))
+    except Exception:
+        return False
+    return cc >= _FP8_MIN_CC

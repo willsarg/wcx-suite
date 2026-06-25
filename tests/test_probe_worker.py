@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import types
 
 from wcx_suite import probe_worker
@@ -63,6 +64,36 @@ def test_main_strips_flash_attn_into_prefer_flash_kwarg(monkeypatch, capsys):
     probe_worker.main(["fake", "model", "--flash-attn", "2000"])
     # --flash-attn becomes a kwarg; the remaining args stay positional (never shifts kv_bits)
     assert seen["kw"] == {"prefer_flash": True} and seen["args"] == ("model", "2000")
+
+
+def test_main_strips_weight_quant_value_into_kwarg(monkeypatch, capsys):
+    seen = {}
+    monkeypatch.setitem(probe_worker._MODES, "fake",
+                        lambda *a, **k: seen.update(args=a, kw=k) or {"ok": True})
+    probe_worker.main(["fake", "model", "--weight-quant", "int8", "2000"])
+    assert seen["kw"] == {"weight_quant": "int8"} and seen["args"] == ("model", "2000")
+
+
+def test_load_model_device_map_for_quantized_else_to_cuda(monkeypatch):
+    seen = {}
+
+    class FakeModel:
+        def eval(self): return self
+        def to(self, d): seen["to"] = d; return self
+
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(
+        AutoModelForCausalLM=types.SimpleNamespace(
+            from_pretrained=lambda mid, **k: (seen.update(kw=k) or FakeModel()))))
+    monkeypatch.setattr(probe_worker.models, "is_prequantized", lambda hf: False)
+    monkeypatch.setattr(probe_worker.models, "attn_implementation", lambda pf: "sdpa")
+    monkeypatch.setattr(probe_worker.models, "weight_quant_kwargs",
+                        lambda wq, prequantized=False: {"quantization_config": "BNB"} if wq != "none" else {})
+    ft = types.SimpleNamespace(float16="f16")
+    probe_worker._load_model("m", ft, weight_quant="int4")            # quantized → device_map, no .to
+    assert seen["kw"].get("device_map") == "cuda" and "to" not in seen
+    seen.clear()
+    probe_worker._load_model("m", ft, weight_quant="none")            # fp16 → .to("cuda")
+    assert seen.get("to") == "cuda" and "device_map" not in seen["kw"]
 
 
 def test_main_no_flash_attn_means_no_prefer_kwarg(monkeypatch, capsys):

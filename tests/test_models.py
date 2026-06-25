@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import types
 
 import pytest
 
@@ -88,6 +90,33 @@ def test_kv_bytes_and_slope_are_quant_aware(tmp_path, monkeypatch):
     # opting into quant lowers the slope → a higher gated ceiling (the slope-bug lesson)
     assert info.estimated_slope_gb_per_k(4) < info.estimated_slope_gb_per_k(8) \
         < info.estimated_slope_gb_per_k(None)
+
+
+def test_weight_bytes_factor():
+    assert models.weight_bytes_factor("none") == 1.0 and models.weight_bytes_factor(None) == 1.0
+    assert models.weight_bytes_factor("int4") < models.weight_bytes_factor("int8") < 1.0
+    assert models.weight_bytes_factor("fp8") == 0.55
+
+
+def test_is_prequantized(tmp_path, monkeypatch):
+    monkeypatch.setattr(models, "HUB", str(tmp_path))
+    _make_model(tmp_path, "org/plain", _LLAMA)
+    assert models.is_prequantized("org/plain") is False
+    _make_model(tmp_path, "org/gptq", {**_LLAMA, "quantization_config": {"quant_method": "gptq"}})
+    assert models.is_prequantized("org/gptq") is True
+
+
+def test_weight_quant_kwargs_builds_configs(monkeypatch):
+    fake_tf = types.SimpleNamespace(BitsAndBytesConfig=lambda **k: ("bnb", k),
+                                    FineGrainedFP8Config=lambda: ("fp8",))
+    monkeypatch.setitem(sys.modules, "transformers", fake_tf)
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(float16="f16"))
+    assert models.weight_quant_kwargs("none") == {}
+    assert models.weight_quant_kwargs("int4", prequantized=True) == {}   # loader handles pre-quant
+    assert models.weight_quant_kwargs("int8")["quantization_config"] == ("bnb", {"load_in_8bit": True})
+    k4 = models.weight_quant_kwargs("int4")["quantization_config"]
+    assert k4[0] == "bnb" and k4[1]["load_in_4bit"] is True and k4[1]["bnb_4bit_quant_type"] == "nf4"
+    assert models.weight_quant_kwargs("fp8")["quantization_config"] == ("fp8",)
 
 
 def test_attn_implementation_sdpa_default_and_availability_gated(monkeypatch):

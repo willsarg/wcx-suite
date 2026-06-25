@@ -68,7 +68,8 @@ def _run_worker(args: list[str], timeout: float = 120) -> dict | None:
 
 
 def measure_once(hf_id: str, ctx: int, *, abort_gb: float, kv_bits: int | None = None,
-                 prefer_flash: bool = False, timeout: float = 600) -> dict:
+                 prefer_flash: bool = False, weight_quant: str = "none",
+                 timeout: float = 600) -> dict:
     """Probe *hf_id* at one context in the isolated GPU worker; normalise to the driver shape.
 
     The worker speaks ``{ok, ...}``; ARA's :mod:`wcx_suite.measure_one` (and the wmx contract it
@@ -84,6 +85,8 @@ def measure_once(hf_id: str, ctx: int, *, abort_gb: float, kv_bits: int | None =
         args.append(str(kv_bits))
     if prefer_flash:
         args.append("--flash-attn")
+    if weight_quant and weight_quant != "none":
+        args += ["--weight-quant", weight_quant]
     data = _run_worker(args, timeout=timeout)
     if data is None:
         return {"status": "error", "note": "no output from probe worker"}
@@ -117,17 +120,20 @@ class Characterization:
 def characterize(model: str, *, budget_gb: float,
                  contexts: tuple[int, ...] = DEFAULT_RAMP,
                  kv_bits: int | None = None, prefer_flash: bool = False,
-                 timeout: float = 600) -> Characterization | None:
+                 weight_quant: str = "none", timeout: float = 600) -> Characterization | None:
     """Probe *model* at a few safe contexts on the GPU, then extrapolate the safe ceiling.
 
     *kv_bits* (when set) measures with a quantized KV cache; *prefer_flash* opts into
-    FlashAttention-2. Returns None if the worker couldn't load/measure (e.g. the model OOMs)."""
+    FlashAttention-2; *weight_quant* loads the weights quantized. Returns None if the worker
+    couldn't load/measure (e.g. the model OOMs)."""
     ramp = ",".join(str(c) for c in contexts)
     args = ["characterize", model, ramp]
     if kv_bits is not None:
         args.append(str(kv_bits))   # positional 3rd arg (worker dispatches positionally)
     if prefer_flash:
         args.append("--flash-attn")
+    if weight_quant and weight_quant != "none":
+        args += ["--weight-quant", weight_quant]
     data = _run_worker(args, timeout=timeout)
     if not data or not data.get("ok"):
         return None

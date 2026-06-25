@@ -31,6 +31,12 @@ def test_limits_reports_flash_attn_capability(monkeypatch):
     assert device.limits(margin_gb=1.0)["flash_attn_capable"] is True
 
 
+def test_limits_reports_fp8_capability(monkeypatch):
+    _fake_limits(monkeypatch)
+    monkeypatch.setattr(system, "fp8_capable", lambda: True)
+    assert device.limits(margin_gb=1.0)["fp8_capable"] is True
+
+
 def test_limits_error_when_no_gpu(monkeypatch):
     monkeypatch.setattr(system, "read_limits", lambda: None)
     assert device.limits() == {"error": "no NVIDIA GPU visible to nvidia-smi"}

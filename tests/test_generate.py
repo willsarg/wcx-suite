@@ -78,7 +78,7 @@ def _patch_engine(monkeypatch, *, info=None, limits=None, n_prompt_tokens=6,
 
     gate_seen = {}
 
-    def fake_gate(info_, limits_, ctx_, *, margin_gb, overhead_gb, live_base, kv_bits=None):
+    def fake_gate(info_, limits_, ctx_, *, margin_gb, overhead_gb, live_base, kv_bits=None, weight_quant="none"):
         gate_seen["ctx"] = ctx_
         gate_seen["margin_gb"] = margin_gb
         gate_seen["overhead_gb"] = overhead_gb
@@ -173,7 +173,7 @@ def test_run_threads_prefer_flash_to_generate(monkeypatch):
     _patch_engine(monkeypatch)
     seen = {}
     monkeypatch.setattr(generate, "_generate",
-                        lambda hf, p, mt, kv=None, pf=False: seen.update(pf=pf) or "out")
+                        lambda hf, p, mt, kv=None, pf=False, wq="none": seen.update(pf=pf) or "out")
     generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=8,
                  prompt="hi", prefer_flash=True)
     assert seen["pf"] is True
@@ -187,6 +187,26 @@ def test_main_threads_flash_attn(monkeypatch):
     generate.main(["org/m", "2000", "--margin", "1.0", "--overhead", "0.6",
                    "--max-tokens", "8", "--flash-attn"])
     assert seen["prefer_flash"] is True
+
+
+def test_run_threads_weight_quant_to_generate(monkeypatch):
+    _patch_engine(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(generate, "_generate",
+                        lambda hf, p, mt, kv=None, pf=False, wq="none": seen.update(wq=wq) or "out")
+    generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=8,
+                 prompt="hi", weight_quant="int4")
+    assert seen["wq"] == "int4"
+
+
+def test_main_threads_weight_quant(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(generate, "run",
+                        lambda *a, **k: seen.update(k) or {"context": a[1], "completion": "x"})
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(read=lambda: "hi"))
+    generate.main(["org/m", "2000", "--margin", "1.0", "--overhead", "0.6",
+                   "--max-tokens", "8", "--weight-quant", "int8"])
+    assert seen["weight_quant"] == "int8"
 
 
 # ---- refusing safety gate -----------------------------------------------------------------

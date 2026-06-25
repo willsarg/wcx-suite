@@ -112,6 +112,24 @@ def test_flash_attn_capable_false_when_nvml_errors(monkeypatch):
     assert system.flash_attn_capable() is False
 
 
+def test_fp8_capable_true_on_ada_hopper(monkeypatch):
+    monkeypatch.setattr(system, "_pynvml", lambda: types.SimpleNamespace(
+        nvmlDeviceGetCudaComputeCapability=lambda h: (8, 9)), raising=False)   # Ada sm_89
+    monkeypatch.setattr(system, "_nvml_handle", lambda: object(), raising=False)
+    assert system.fp8_capable() is True
+
+
+def test_fp8_capable_false_on_turing(monkeypatch):
+    monkeypatch.setattr(system, "_pynvml", lambda: types.SimpleNamespace(
+        nvmlDeviceGetCudaComputeCapability=lambda h: (7, 5)), raising=False)   # RTX 2070
+    monkeypatch.setattr(system, "_nvml_handle", lambda: object(), raising=False)
+    assert system.fp8_capable() is False
+
+
+def test_fp8_capable_false_when_nvml_errors(monkeypatch):
+    assert system.fp8_capable() is False        # autouse _no_pynvml → can't read → conservatively False
+
+
 def test_read_limits_parses_nvidia_smi(monkeypatch):
     monkeypatch.setattr(system, "_smi_query",
                         lambda: "NVIDIA GeForce RTX 2070, 8192, 1024, 7168\n")

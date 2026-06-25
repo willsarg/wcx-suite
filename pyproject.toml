@@ -21,6 +21,8 @@ cuda = [
     "transformers>=4.45",
     "nvidia-ml-py>=12",
     "hqq>=0.2",          # KV-cache quantization backend (transformers cache_implementation="quantized")
+    "bitsandbytes>=0.43",  # weight quantization (int8 LLM.int8 / int4 NF4) — works on Turing sm_75+
+    "accelerate>=0.30",    # device_map placement required by quantized (bnb/FP8/pre-quantized) loads
 ]
 
 [project.scripts]

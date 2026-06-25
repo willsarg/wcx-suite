@@ -44,20 +44,20 @@ def _count_prompt_tokens(hf_id: str, prompt: str) -> int:
 
 
 def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = None,
-              prefer_flash: bool = False) -> str:
+              prefer_flash: bool = False, weight_quant: str = "none") -> str:
     """Load *hf_id* on CUDA, generate up to *max_tokens* new tokens, return the NEW text only.
 
     *kv_bits* (when set) quantizes the KV cache during generation — the same precision the ceiling
     was certified at, so the run executes exactly as characterized; *prefer_flash* opts into
-    FlashAttention-2 (else SDPA), matching characterize."""
+    FlashAttention-2 (else SDPA); *weight_quant* loads weights quantized — all matching characterize.
+    Reuses probe_worker's load (quantized weights need device_map, not .to())."""
     import torch                                            # lazy (NVIDIA-only [cuda] extra)
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
+
+    from .probe_worker import _load_model
 
     tokenizer = AutoTokenizer.from_pretrained(hf_id)
-    model = AutoModelForCausalLM.from_pretrained(
-        hf_id, torch_dtype=torch.float16,                   # mirror probe_worker's load
-        attn_implementation=models.attn_implementation(prefer_flash)).to("cuda")
-    model.eval()
+    model = _load_model(hf_id, torch, prefer_flash=prefer_flash, weight_quant=weight_quant)
 
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
     prompt_len = inputs.input_ids.shape[1]
@@ -69,7 +69,8 @@ def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = No
 
 
 def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float, max_tokens: int,
-        prompt: str = "", kv_bits: int | None = None, prefer_flash: bool = False) -> dict:
+        prompt: str = "", kv_bits: int | None = None, prefer_flash: bool = False,
+        weight_quant: str = "none") -> dict:
     """Gate on the effective context, then (if safe) load + generate. Returns the result dict.
 
     The refusal/success both report the ceiling *ctx* (consistent with the wmx verb and the cpu
@@ -94,11 +95,11 @@ def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float, max_token
     live_base = limits.used_gb              # mirrors measure_one.run's exact call site
     reason = measure_one.safety_gate(info, limits, effective_ctx, margin_gb=margin_gb,
                                      overhead_gb=overhead_gb, live_base=live_base,
-                                     kv_bits=eff_kv_bits)
+                                     kv_bits=eff_kv_bits, weight_quant=weight_quant)
     if reason is not None:
         return _refused(ctx, reason)        # report the ceiling, not the effective ctx
 
-    completion = _generate(hf_id, prompt, max_tokens, eff_kv_bits, prefer_flash)
+    completion = _generate(hf_id, prompt, max_tokens, eff_kv_bits, prefer_flash, weight_quant)
     return {"context": ctx, "completion": completion}
 
 
@@ -113,11 +114,13 @@ def main(argv=None) -> None:
                     help="quantize the KV cache to N bits (8 or 4); default fp16")
     ap.add_argument("--flash-attn", action="store_true",
                     help="opt into FlashAttention-2 (Ampere+ only; else falls back to SDPA)")
+    ap.add_argument("--weight-quant", default="none",
+                    help="load weights quantized: int8 / int4 / fp8 (default none)")
     args = ap.parse_args(argv)
     prompt = sys.stdin.read()               # PROMPT comes from stdin, never argv
     result = run(args.hf_id, args.ctx, margin_gb=args.margin, overhead_gb=args.overhead,
                  max_tokens=args.max_tokens, prompt=prompt, kv_bits=args.kv_bits,
-                 prefer_flash=args.flash_attn)
+                 prefer_flash=args.flash_attn, weight_quant=args.weight_quant)
     print(json.dumps(result), flush=True)
 
 

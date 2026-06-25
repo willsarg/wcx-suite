@@ -39,6 +39,48 @@ GIB = 1024 ** 3
 KV_GROUP_SIZE = 64
 
 
+# Runtime WEIGHT quantization (NVIDIA-native; no GGUF/MLX parallel — they ship pre-quantized files).
+# The factor is the fraction of the on-disk fp16 weight size the quantized weights occupy — kept
+# slightly conservative (the measured ramp corrects it; an over-estimate only makes the a-priori
+# gate stop escalating sooner — safe, Rule #1). int8 = LLM.int8, int4 = NF4 + double-quant, fp8 =
+# FineGrainedFP8 (Ada/Hopper only). None/"none" = fp16 weights as shipped.
+_WEIGHT_BYTES_FACTOR = {"none": 1.0, "int8": 0.55, "int4": 0.35, "fp8": 0.55}
+
+
+def weight_bytes_factor(weight_quant: str | None) -> float:
+    """Fraction of the on-disk fp16 weight size the weights occupy at *weight_quant* (1.0 = none)."""
+    return _WEIGHT_BYTES_FACTOR.get(weight_quant or "none", 1.0)
+
+
+def is_prequantized(hf_id: str) -> bool:
+    """True if the repo ships already-quantized weights (GPTQ/AWQ/etc. — a ``quantization_config``
+    in its config). transformers loads those as-is, so we must NOT stack bitsandbytes on top, and
+    the on-disk weight size already reflects the quantization (factor 1.0)."""
+    raw = _read_config(hf_id) or {}
+    t = raw.get("text_config", raw) if isinstance(raw.get("text_config"), dict) else raw
+    return bool(raw.get("quantization_config") or t.get("quantization_config"))
+
+
+def weight_quant_kwargs(weight_quant: str | None, *, prequantized: bool = False) -> dict:
+    """``from_pretrained`` kwargs to load weights at *weight_quant*, or ``{}`` for none / a
+    pre-quantized repo (transformers handles those from the repo's own config). Lazily imports
+    transformers. fp8 is gated on hardware by the caller (see :func:`system.fp8_capable`)."""
+    if weight_quant in (None, "none") or prequantized:
+        return {}
+    import torch
+    from transformers import BitsAndBytesConfig
+    if weight_quant == "int8":
+        return {"quantization_config": BitsAndBytesConfig(load_in_8bit=True)}
+    if weight_quant == "int4":
+        return {"quantization_config": BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.float16)}
+    if weight_quant == "fp8":
+        from transformers import FineGrainedFP8Config
+        return {"quantization_config": FineGrainedFP8Config()}
+    return {}
+
+
 def attn_implementation(prefer_flash: bool) -> str:
     """The transformers ``attn_implementation`` to load with. SDPA (always available, fused) is the
     default; FlashAttention-2 is used ONLY when the user opted in AND the GPU+package support it

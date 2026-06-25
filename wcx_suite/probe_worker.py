@@ -96,18 +96,37 @@ def _fill_kv(model, ids, kv_bits, torch) -> None:
     torch.cuda.synchronize()
 
 
+def _load_model(model_id, torch, *, prefer_flash=False, weight_quant="none"):
+    """Load the causal LM with the requested attention + weight quantization. Quantized loads
+    (bitsandbytes int8/int4, FP8, or a pre-quantized GPTQ/AWQ repo) place weights via ``device_map``
+    — you can't ``.to()`` a quantized model after loading; an fp16 load goes straight to CUDA."""
+    from transformers import AutoModelForCausalLM
+
+    prequant = models.is_prequantized(model_id)
+    kw = {"torch_dtype": torch.float16,
+          "attn_implementation": models.attn_implementation(prefer_flash)}
+    kw.update(models.weight_quant_kwargs(weight_quant, prequantized=prequant))
+    if "quantization_config" in kw or prequant:
+        model = AutoModelForCausalLM.from_pretrained(model_id, device_map="cuda", **kw)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(model_id, **kw).to("cuda")
+    model.eval()
+    return model
+
+
 def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = None, *,
-                 prefer_flash: bool = False) -> dict:
+                 prefer_flash: bool = False, weight_quant: str = "none") -> dict:
     """Load *model_id* on the GPU and measure total VRAM at each context in *contexts_csv*.
 
     Probes small→large; stops at the first context that errors/OOMs, keeping the safe points
     below it. Total VRAM is nvidia-smi ``used`` after a synchronized forward — it captures the
     display baseline, the CUDA context, and torch's (retained) reserved pool, so it's the
     conservative number to compare against the wall. *kv_bits_str* (when given) measures with a
-    quantized KV cache; *prefer_flash* opts into FlashAttention-2 (else SDPA).
+    quantized KV cache; *prefer_flash* opts into FlashAttention-2 (else SDPA); *weight_quant*
+    loads the weights quantized (int8/int4/fp8).
     """
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     if not torch.cuda.is_available():
         return {"ok": False, "error": "CUDA not available"}
@@ -116,10 +135,7 @@ def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = Non
     kv_bits = int(kv_bits_str) if kv_bits_str is not None else None
     try:
         AutoTokenizer.from_pretrained(model_id)   # validate + warm the cache
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=torch.float16,
-            attn_implementation=models.attn_implementation(prefer_flash)).to("cuda")
-        model.eval()
+        model = _load_model(model_id, torch, prefer_flash=prefer_flash, weight_quant=weight_quant)
     except Exception as exc:
         return {"ok": False, "error": f"load failed: {type(exc).__name__}: {exc}"}
 
@@ -141,7 +157,8 @@ def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = Non
 
 
 def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None,
-            kv_bits_str: str | None = None, *, prefer_flash: bool = False) -> dict:
+            kv_bits_str: str | None = None, *, prefer_flash: bool = False,
+            weight_quant: str = "none") -> dict:
     """Load *model_id* on the GPU at one context and return its VRAM delta over the launch baseline.
 
     Single-context primitive ARA's driver drives (via :func:`probe.measure_once`). Refuses before
@@ -158,7 +175,7 @@ def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None,
     kv_bits = int(kv_bits_str) if kv_bits_str is not None else None
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     if not torch.cuda.is_available():
         return {"ok": False, "error": "CUDA not available"}
@@ -170,10 +187,7 @@ def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None,
     device = torch.cuda.get_device_name(0)
     try:
         AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=torch.float16,
-            attn_implementation=models.attn_implementation(prefer_flash)).to("cuda")
-        model.eval()
+        model = _load_model(model_id, torch, prefer_flash=prefer_flash, weight_quant=weight_quant)
         ids = torch.randint(0, int(model.config.vocab_size), (1, ctx), device="cuda")
         _fill_kv(model, ids, kv_bits, torch)
     except Exception as exc:
@@ -195,10 +209,14 @@ def main(argv: list[str] | None = None) -> int:
     if fn is None:
         result: dict = {"ok": False, "error": f"unknown mode: {mode!r}"}
     else:
-        # --flash-attn is a named flag (stripped to a kwarg) so it never collides with the
-        # conditional positional kv_bits; everything else stays positional.
+        # --flash-attn (bare) and --weight-quant <val> are named flags stripped to kwargs, so they
+        # never collide with the conditional positional kv_bits; everything else stays positional.
         rest = [a for a in argv[1:] if a != "--flash-attn"]
         kwargs = {"prefer_flash": True} if "--flash-attn" in argv[1:] else {}
+        if "--weight-quant" in rest:
+            i = rest.index("--weight-quant")
+            kwargs["weight_quant"] = rest[i + 1]
+            del rest[i:i + 2]
         try:
             result = fn(*rest, **kwargs)
         except Exception as exc:   # never let a GPU fault escape as a traceback

@@ -86,6 +86,15 @@ def test_measure_once_appends_flash_attn(monkeypatch):
     assert "--flash-attn" not in seen2["args"]          # SDPA default
 
 
+def test_measure_once_appends_weight_quant(monkeypatch):
+    seen = _capture_args(monkeypatch, {"ok": True, "used_gb": 4.0, "baseline_gb": 2.0})
+    probe.measure_once("m", 2000, abort_gb=7.0, weight_quant="int4")
+    assert seen["args"][-2:] == ["--weight-quant", "int4"]
+    seen2 = _capture_args(monkeypatch, {"ok": True, "used_gb": 4.0, "baseline_gb": 2.0})
+    probe.measure_once("m", 2000, abort_gb=7.0)            # default none → omitted
+    assert "--weight-quant" not in seen2["args"]
+
+
 def test_characterize_appends_kv_bits(monkeypatch):
     seen = _capture_args(monkeypatch, {"ok": True, "device": "X",
                                        "points": [{"context": 512, "used_gb": 2.0},
