@@ -14,9 +14,12 @@ dependencies = []
 # Real load-and-measure on the GPU. Heavy (torch CUDA wheels) and only ever installed
 # on an NVIDIA box (via `ara install --engine wcx`), so the weight lands where it's used.
 # The probe worker imports these lazily — the core stays installable without them.
+# nvidia-ml-py provides the `pynvml` NVML binding for native VRAM reads (system.py); when it's
+# absent the core falls back to parsing nvidia-smi, so it stays an accelerator, not a hard dep.
 cuda = [
     "torch>=2.4",
     "transformers>=4.45",
+    "nvidia-ml-py>=12",
 ]
 
 [project.scripts]
