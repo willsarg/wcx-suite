@@ -27,6 +27,11 @@ HUB = os.path.expanduser("~/.cache/huggingface/hub")
 # over-estimate only makes the a-priori (L1/L4) gates stop escalating a little sooner — safe.
 PREFILL_SPIKE_MULT = 2.0
 
+# VRAM is binary GiB everywhere here (system.py reads the wall/used as bytes ÷ 1024**3). The KV
+# slope must use the SAME unit or the a-priori gate compares a GiB budget against a decimal-GB
+# slope — a ~7.37% dimensional error (Rule #1/#3). The mirror of project-ara's ramp.py GIB fix.
+GIB = 1024 ** 3
+
 
 @dataclass
 class ModelInfo:
@@ -48,9 +53,9 @@ class ModelInfo:
         return self.growing_layers * self.kv_heads * self.head_dim * 2 * 2  # 2=(K,V), 2 bytes fp16
 
     def estimated_slope_gb_per_k(self) -> float:
-        """Conservative VRAM slope (GB per 1k tokens) for an UNcharacterized model: fp16 KV
-        growth scaled by the prefill-spike factor."""
-        return self.fp16_kv_bytes_per_token() * 1000 / 1e9 * PREFILL_SPIKE_MULT
+        """Conservative VRAM slope (binary GiB per 1k tokens) for an UNcharacterized model: fp16 KV
+        growth scaled by the prefill-spike factor. GiB to match the wall (see the GIB note)."""
+        return self.fp16_kv_bytes_per_token() * 1000 / GIB * PREFILL_SPIKE_MULT
 
 
 def _cache_dir(hf_id: str) -> str:

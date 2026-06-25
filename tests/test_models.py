@@ -62,8 +62,19 @@ def test_kv_slope_matches_analytic_fp16(tmp_path, monkeypatch):
     info = models.describe("org/smol")
     # fp16 KV bytes/token = layers × kv_heads × head_dim × 2(K,V) × 2(bytes)
     assert info.fp16_kv_bytes_per_token() == 30 * 3 * 64 * 2 * 2
-    expected = info.fp16_kv_bytes_per_token() * 1000 / 1e9 * models.PREFILL_SPIKE_MULT
+    # binary GiB (1024**3) — the same unit as the VRAM wall/threshold it's solved against, not
+    # decimal GB; mixing the two is a ~7.37% dimensional error in the a-priori gate (Rule #1/#3).
+    expected = info.fp16_kv_bytes_per_token() * 1000 / (1024 ** 3) * models.PREFILL_SPIKE_MULT
     assert info.estimated_slope_gb_per_k() == pytest.approx(expected)
+
+
+def test_kv_slope_uses_binary_gib_not_decimal_gb(tmp_path, monkeypatch):
+    monkeypatch.setattr(models, "HUB", str(tmp_path))
+    _make_model(tmp_path, "org/smol", _LLAMA)
+    info = models.describe("org/smol")
+    decimal_gb = info.fp16_kv_bytes_per_token() * 1000 / 1e9 * models.PREFILL_SPIKE_MULT
+    assert info.estimated_slope_gb_per_k() == pytest.approx(decimal_gb * 1e9 / (1024 ** 3))
+    assert info.estimated_slope_gb_per_k() < decimal_gb
 
 
 def test_head_dim_falls_back_to_hidden_over_heads(tmp_path, monkeypatch):
