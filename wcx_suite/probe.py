@@ -69,7 +69,7 @@ def _run_worker(args: list[str], timeout: float = 120) -> dict | None:
 
 def measure_once(hf_id: str, ctx: int, *, abort_gb: float, kv_bits: int | None = None,
                  prefer_flash: bool = False, weight_quant: str = "none",
-                 timeout: float = 600) -> dict:
+                 chunk: int | None = None, timeout: float = 600) -> dict:
     """Probe *hf_id* at one context in the isolated GPU worker; normalise to the driver shape.
 
     The worker speaks ``{ok, ...}``; ARA's :mod:`wcx_suite.measure_one` (and the wmx contract it
@@ -87,6 +87,8 @@ def measure_once(hf_id: str, ctx: int, *, abort_gb: float, kv_bits: int | None =
         args.append("--flash-attn")
     if weight_quant and weight_quant != "none":
         args += ["--weight-quant", weight_quant]
+    if chunk is not None:
+        args += ["--prefill-chunk", str(chunk)]
     data = _run_worker(args, timeout=timeout)
     if data is None:
         return {"status": "error", "note": "no output from probe worker"}
@@ -120,7 +122,8 @@ class Characterization:
 def characterize(model: str, *, budget_gb: float,
                  contexts: tuple[int, ...] = DEFAULT_RAMP,
                  kv_bits: int | None = None, prefer_flash: bool = False,
-                 weight_quant: str = "none", timeout: float = 600) -> Characterization | None:
+                 weight_quant: str = "none", chunk: int | None = None,
+                 timeout: float = 600) -> Characterization | None:
     """Probe *model* at a few safe contexts on the GPU, then extrapolate the safe ceiling.
 
     *kv_bits* (when set) measures with a quantized KV cache; *prefer_flash* opts into
@@ -134,6 +137,8 @@ def characterize(model: str, *, budget_gb: float,
         args.append("--flash-attn")
     if weight_quant and weight_quant != "none":
         args += ["--weight-quant", weight_quant]
+    if chunk is not None:
+        args += ["--prefill-chunk", str(chunk)]
     data = _run_worker(args, timeout=timeout)
     if not data or not data.get("ok"):
         return None

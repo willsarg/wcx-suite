@@ -95,6 +95,23 @@ def test_measure_once_appends_weight_quant(monkeypatch):
     assert "--weight-quant" not in seen2["args"]
 
 
+def test_measure_once_appends_prefill_chunk(monkeypatch):
+    seen = _capture_args(monkeypatch, {"ok": True, "used_gb": 4.0, "baseline_gb": 2.0})
+    probe.measure_once("m", 2000, abort_gb=7.0, chunk=256)
+    assert seen["args"][-2:] == ["--prefill-chunk", "256"]
+    seen2 = _capture_args(monkeypatch, {"ok": True, "used_gb": 4.0, "baseline_gb": 2.0})
+    probe.measure_once("m", 2000, abort_gb=7.0)            # default off → omitted
+    assert "--prefill-chunk" not in seen2["args"]
+
+
+def test_characterize_appends_prefill_chunk(monkeypatch):
+    seen = _capture_args(monkeypatch, {"ok": True, "device": "X",
+                                       "points": [{"context": 512, "used_gb": 2.0},
+                                                  {"context": 2048, "used_gb": 2.6}]})
+    probe.characterize("smol", budget_gb=7.0, contexts=(512, 2048), chunk=256)
+    assert seen["args"][-2:] == ["--prefill-chunk", "256"]
+
+
 def test_characterize_appends_kv_bits(monkeypatch):
     seen = _capture_args(monkeypatch, {"ok": True, "device": "X",
                                        "points": [{"context": 512, "used_gb": 2.0},

@@ -101,7 +101,8 @@ def preflight(hf_id: str, *, margin_gb: float, overhead_gb: float,
 
 
 def _spawn_worker(hf_id: str, ctx: int, abort_gb: float, kv_bits: int | None = None,
-                  prefer_flash: bool = False, weight_quant: str = "none") -> dict:
+                  prefer_flash: bool = False, weight_quant: str = "none",
+                  chunk: int | None = None) -> dict:
     """Run the isolated GPU probe worker for one context; return its raw result dict.
 
     The worker gets the absolute safe budget as its hard abort limit, so its watchdog (L5) can
@@ -110,7 +111,7 @@ def _spawn_worker(hf_id: str, ctx: int, abort_gb: float, kv_bits: int | None = N
     *prefer_flash* measures with FlashAttention-2 (else SDPA).
     """
     return probe.measure_once(hf_id, ctx, abort_gb=abort_gb, kv_bits=kv_bits,
-                              prefer_flash=prefer_flash, weight_quant=weight_quant)
+                              prefer_flash=prefer_flash, weight_quant=weight_quant, chunk=chunk)
 
 
 def _refused(ctx: int, reason: str) -> dict:
@@ -119,7 +120,8 @@ def _refused(ctx: int, reason: str) -> dict:
 
 def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float,
         repeats: int = DEFAULT_REPEATS, kv_bits: int | None = None,
-        prefer_flash: bool = False, weight_quant: str = "none") -> dict:
+        prefer_flash: bool = False, weight_quant: str = "none",
+        chunk: int | None = None) -> dict:
     """Gate then (if safe) measure; return the canonical result dict.
 
     ``mem_gb`` is the model's VRAM DELTA over its own launch baseline (``used − baseline``),
@@ -147,7 +149,7 @@ def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float,
     deltas = []
     for _ in range(max(1, repeats)):
         raw = _spawn_worker(hf_id, ctx, abort_gb=threshold, kv_bits=eff_kv_bits,
-                            prefer_flash=prefer_flash, weight_quant=weight_quant)
+                            prefer_flash=prefer_flash, weight_quant=weight_quant, chunk=chunk)
         if raw.get("status") != "ok":
             return _refused(ctx, f"probe failed: {raw.get('note', 'no output')}")
         deltas.append(raw["used_gb"] - raw["baseline_gb"])
@@ -169,6 +171,8 @@ def main(argv=None) -> None:
                     help="opt into FlashAttention-2 (Ampere+ only; else falls back to SDPA)")
     ap.add_argument("--weight-quant", default="none",
                     help="load weights quantized: int8 / int4 / fp8 (default none)")
+    ap.add_argument("--prefill-chunk", type=int, default=None,
+                    help="prefill in segments of N tokens (chunked prefill); default single-shot")
     args = ap.parse_args(argv)
     if args.preflight:
         result = preflight(args.hf_id, margin_gb=args.margin, overhead_gb=args.overhead,
@@ -176,7 +180,8 @@ def main(argv=None) -> None:
     else:
         result = run(args.hf_id, args.ctx, margin_gb=args.margin,
                      overhead_gb=args.overhead, repeats=args.repeats, kv_bits=args.kv_bits,
-                     prefer_flash=args.flash_attn, weight_quant=args.weight_quant)
+                     prefer_flash=args.flash_attn, weight_quant=args.weight_quant,
+                     chunk=args.prefill_chunk)
     print(json.dumps(result), flush=True)
 
 

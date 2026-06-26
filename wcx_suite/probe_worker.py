@@ -81,13 +81,59 @@ def calibrate() -> dict:
     }
 
 
-def _fill_kv(model, ids, kv_bits, torch) -> None:
-    """Populate the KV cache to *ids* length at the requested precision, so the VRAM read reflects
-    how it'll actually run. fp16 is a plain forward; quantized goes through ``generate`` (one step)
-    so transformers builds the quantized cache via its public ``cache_implementation`` API."""
-    from . import models
+def _chunked_prefill(model, ids, torch, *, chunk, cache):
+    """Prefill in fixed-size segments, accumulating the KV cache, so per-forward attention is
+    ``chunk × N`` instead of ``N × N`` — the long-context unlock on cards without an efficient
+    attention kernel (Turing). Feeds ``chunk`` tokens at a time with an explicit ``cache_position``
+    (keeps RoPE + the causal mask correct across the growing cache) and ``logits_to_keep=1`` (the
+    per-position logits tensor is never needed during prefill). Returns ``(cache, last_logits)``."""
+    n = ids.shape[1]
+    last_logits = None
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        out = model(ids[:, s:e], past_key_values=cache,
+                    cache_position=torch.arange(s, e, device=ids.device),
+                    use_cache=True, logits_to_keep=1)
+        cache, last_logits = out.past_key_values, out.logits
+    return cache, last_logits
 
+
+def _new_cache(kv_bits, torch, model):
+    """The KV cache object chunked prefill fills incrementally: a plain ``DynamicCache`` (fp16) or an
+    HQQ ``QuantizedCache`` (kv_bits), matching the precision the ceiling is certified at. transformers
+    5.x builds the quantized cache from ``(backend, model.config, nbits, q_group_size)`` — both live
+    in ``cache_utils``. GPU/transformers-only and live-validated; the chunking *logic* around it is
+    unit-tested separately."""
+    from transformers.cache_utils import DynamicCache
+    if kv_bits is None:
+        return DynamicCache()
+    from transformers.cache_utils import QuantizedCache
+    return QuantizedCache(backend="hqq", config=model.config, nbits=kv_bits,
+                          q_group_size=models.KV_GROUP_SIZE)
+
+
+# Chunked prefill into a QUANTIZED cache is novel (HQQ is built for single-token decode updates); if
+# the cache can't be built or rejects a multi-token chunk fill, we fall back to single-shot for that
+# path — and measurement + generation both fall back identically (shared code), so the gate stays
+# honest. ImportError/AttributeError cover a transformers cache-API shift; NotImplementedError/Type/
+# Value cover a cache that won't take the update. Narrow on purpose: never swallow an
+# OutOfMemoryError (a real wall hit must surface, not silently retry a bigger single-shot).
+_CHUNK_FALLBACK_ERRORS = (NotImplementedError, TypeError, ValueError, ImportError, AttributeError)
+
+
+def _fill_kv(model, ids, kv_bits, torch, *, chunk=None) -> None:
+    """Populate the KV cache to *ids* length at the requested precision, so the VRAM read reflects
+    how it'll actually run. With *chunk* set, prefill is segmented (``_chunked_prefill``) so the
+    measured footprint matches a chunked ``run``; else fp16 is a plain forward and quantized goes
+    through ``generate`` (one step) so transformers builds the quantized cache via its public API."""
     with torch.no_grad():
+        if chunk is not None:
+            try:
+                _chunked_prefill(model, ids, torch, chunk=chunk, cache=_new_cache(kv_bits, torch, model))
+                torch.cuda.synchronize()
+                return
+            except _CHUNK_FALLBACK_ERRORS:
+                pass        # quantized cache won't take chunk fills → single-shot below (symmetric)
         if kv_bits is None:
             model(ids)
         else:
@@ -115,7 +161,8 @@ def _load_model(model_id, torch, *, prefer_flash=False, weight_quant="none"):
 
 
 def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = None, *,
-                 prefer_flash: bool = False, weight_quant: str = "none") -> dict:
+                 prefer_flash: bool = False, weight_quant: str = "none",
+                 chunk: int | None = None) -> dict:
     """Load *model_id* on the GPU and measure total VRAM at each context in *contexts_csv*.
 
     Probes small→large; stops at the first context that errors/OOMs, keeping the safe points
@@ -143,7 +190,7 @@ def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = Non
     for ctx in contexts:
         try:
             ids = torch.randint(0, int(model.config.vocab_size), (1, ctx), device="cuda")
-            _fill_kv(model, ids, kv_bits, torch)
+            _fill_kv(model, ids, kv_bits, torch, chunk=chunk)
         except Exception:
             break   # OOM/error at this context — stop, keep the safe points below it
         used = _used_mb()
@@ -158,7 +205,7 @@ def characterize(model_id: str, contexts_csv: str, kv_bits_str: str | None = Non
 
 def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None,
             kv_bits_str: str | None = None, *, prefer_flash: bool = False,
-            weight_quant: str = "none") -> dict:
+            weight_quant: str = "none", chunk: int | None = None) -> dict:
     """Load *model_id* on the GPU at one context and return its VRAM delta over the launch baseline.
 
     Single-context primitive ARA's driver drives (via :func:`probe.measure_once`). Refuses before
@@ -189,7 +236,7 @@ def measure(model_id: str, ctx_str: str, abort_gb_str: str | None = None,
         AutoTokenizer.from_pretrained(model_id)
         model = _load_model(model_id, torch, prefer_flash=prefer_flash, weight_quant=weight_quant)
         ids = torch.randint(0, int(model.config.vocab_size), (1, ctx), device="cuda")
-        _fill_kv(model, ids, kv_bits, torch)
+        _fill_kv(model, ids, kv_bits, torch, chunk=chunk)
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -216,6 +263,10 @@ def main(argv: list[str] | None = None) -> int:
         if "--weight-quant" in rest:
             i = rest.index("--weight-quant")
             kwargs["weight_quant"] = rest[i + 1]
+            del rest[i:i + 2]
+        if "--prefill-chunk" in rest:
+            i = rest.index("--prefill-chunk")
+            kwargs["chunk"] = int(rest[i + 1])
             del rest[i:i + 2]
         try:
             result = fn(*rest, **kwargs)

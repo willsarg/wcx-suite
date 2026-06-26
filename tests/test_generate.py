@@ -173,7 +173,7 @@ def test_run_threads_prefer_flash_to_generate(monkeypatch):
     _patch_engine(monkeypatch)
     seen = {}
     monkeypatch.setattr(generate, "_generate",
-                        lambda hf, p, mt, kv=None, pf=False, wq="none": seen.update(pf=pf) or "out")
+                        lambda hf, p, mt, kv=None, pf=False, wq="none", ch=None: seen.update(pf=pf) or "out")
     generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=8,
                  prompt="hi", prefer_flash=True)
     assert seen["pf"] is True
@@ -193,7 +193,7 @@ def test_run_threads_weight_quant_to_generate(monkeypatch):
     _patch_engine(monkeypatch)
     seen = {}
     monkeypatch.setattr(generate, "_generate",
-                        lambda hf, p, mt, kv=None, pf=False, wq="none": seen.update(wq=wq) or "out")
+                        lambda hf, p, mt, kv=None, pf=False, wq="none", ch=None: seen.update(wq=wq) or "out")
     generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=8,
                  prompt="hi", weight_quant="int4")
     assert seen["wq"] == "int4"
@@ -207,6 +207,67 @@ def test_main_threads_weight_quant(monkeypatch):
     generate.main(["org/m", "2000", "--margin", "1.0", "--overhead", "0.6",
                    "--max-tokens", "8", "--weight-quant", "int8"])
     assert seen["weight_quant"] == "int8"
+
+
+def test_run_threads_chunk_to_generate(monkeypatch):
+    _patch_engine(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(generate, "_generate",
+                        lambda hf, p, mt, kv=None, pf=False, wq="none", ch=None:
+                        seen.update(ch=ch) or "out")
+    generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=8,
+                 prompt="hi", chunk=256)
+    assert seen["ch"] == 256          # run will prefill exactly as characterize measured
+
+
+def test_main_threads_prefill_chunk(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(generate, "run",
+                        lambda *a, **k: seen.update(k) or {"context": a[1], "completion": "x"})
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(read=lambda: "hi"))
+    generate.main(["org/m", "2000", "--margin", "1.0", "--overhead", "0.6",
+                   "--max-tokens", "8", "--prefill-chunk", "256"])
+    assert seen["chunk"] == 256
+
+
+# ---- greedy decode loop (chunked path) ----------------------------------------------------
+
+class _Logits:
+    """Stand-in for a logits tensor: logits[:, -1, :] is a no-op; carries the argmax value."""
+    def __init__(self, val): self.val = val
+    def __getitem__(self, key): return self
+
+
+def _decode_torch():
+    return types.SimpleNamespace(
+        argmax=lambda x, dim=None: [x.val],                 # [0] → x.val
+        tensor=lambda data, device=None: ("tensor", data),
+        arange=lambda s, e, device=None: ("arange", s, e))
+
+
+class _DecodeModel:
+    """Each forward yields the next predetermined logits, so we can assert the decoded sequence."""
+    def __init__(self, seq): self.seq = list(seq); self.i = 0; self.calls = []
+    def __call__(self, ids, past_key_values=None, cache_position=None, **k):
+        self.calls.append(cache_position)
+        val = self.seq[self.i]; self.i += 1
+        return types.SimpleNamespace(past_key_values="cache", logits=_Logits(val))
+
+
+def test_greedy_decode_emits_argmax_sequence_and_advances_cache_position():
+    model = _DecodeModel([20, 30, 40])
+    ids = generate._greedy_decode(model, "cache", _Logits(10), _decode_torch(),
+                                  max_tokens=3, start_pos=6, eos_id=None)
+    assert ids == [10, 20, 30]                              # first from prefill logits, then fed back
+    assert model.calls[:2] == [("arange", 6, 7), ("arange", 7, 8)]   # cache_position advances by 1
+
+
+def test_greedy_decode_stops_at_eos():
+    model = _DecodeModel([99, 99])
+    ids = generate._greedy_decode(model, "cache", _Logits(2), _decode_torch(),
+                                  max_tokens=10, start_pos=6, eos_id=2)
+    assert ids == [2]                                      # EOS on the first token → stop, no forward
+    assert model.calls == []
 
 
 # ---- refusing safety gate -----------------------------------------------------------------

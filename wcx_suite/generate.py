@@ -43,24 +43,51 @@ def _count_prompt_tokens(hf_id: str, prompt: str) -> int:
     return len(AutoTokenizer.from_pretrained(hf_id).encode(prompt))
 
 
+def _greedy_decode(model, cache, last_logits, torch, *, max_tokens, start_pos, eos_id) -> list:
+    """Greedy decode after a chunked prefill: argmax the running logits, feed one token at a time
+    back into the accumulated *cache* (with the correct ``cache_position``), stop at *max_tokens* or
+    EOS. Greedy matches the non-chunked default (``do_sample=False``). Returns the new token ids."""
+    ids, logits, pos = [], last_logits, start_pos
+    for _ in range(max_tokens):
+        nxt = int(torch.argmax(logits[:, -1, :], dim=-1)[0])
+        ids.append(nxt)
+        if eos_id is not None and nxt == eos_id:
+            break
+        out = model(torch.tensor([[nxt]], device="cuda"), past_key_values=cache,
+                    cache_position=torch.arange(pos, pos + 1, device="cuda"),
+                    use_cache=True, logits_to_keep=1)
+        cache, logits, pos = out.past_key_values, out.logits, pos + 1
+    return ids
+
+
 def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = None,
-              prefer_flash: bool = False, weight_quant: str = "none") -> str:
+              prefer_flash: bool = False, weight_quant: str = "none",
+              chunk: int | None = None) -> str:
     """Load *hf_id* on CUDA, generate up to *max_tokens* new tokens, return the NEW text only.
 
     *kv_bits* (when set) quantizes the KV cache during generation — the same precision the ceiling
     was certified at, so the run executes exactly as characterized; *prefer_flash* opts into
     FlashAttention-2 (else SDPA); *weight_quant* loads weights quantized — all matching characterize.
+    With *chunk* set, the prompt is prefilled in segments (``_chunked_prefill``) then greedily
+    decoded, so ``run`` reproduces the chunked footprint the ceiling was certified at.
     Reuses probe_worker's load (quantized weights need device_map, not .to())."""
     import torch                                            # lazy (NVIDIA-only [cuda] extra)
     from transformers import AutoTokenizer
 
-    from .probe_worker import _load_model
+    from .probe_worker import _chunked_prefill, _load_model, _new_cache
 
     tokenizer = AutoTokenizer.from_pretrained(hf_id)
     model = _load_model(hf_id, torch, prefer_flash=prefer_flash, weight_quant=weight_quant)
 
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
     prompt_len = inputs.input_ids.shape[1]
+    if chunk is not None:
+        with torch.no_grad():
+            cache, last_logits = _chunked_prefill(
+                model, inputs.input_ids, torch, chunk=chunk, cache=_new_cache(kv_bits, torch, model))
+            new_tokens = _greedy_decode(model, cache, last_logits, torch, max_tokens=max_tokens,
+                                        start_pos=prompt_len, eos_id=tokenizer.eos_token_id)
+        return tokenizer.decode(new_tokens, skip_special_tokens=True)
     with torch.no_grad():
         out = model.generate(input_ids=inputs.input_ids, max_new_tokens=max_tokens,
                              **models.kv_cache_kwargs(kv_bits))
@@ -70,7 +97,7 @@ def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = No
 
 def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float, max_tokens: int,
         prompt: str = "", kv_bits: int | None = None, prefer_flash: bool = False,
-        weight_quant: str = "none") -> dict:
+        weight_quant: str = "none", chunk: int | None = None) -> dict:
     """Gate on the effective context, then (if safe) load + generate. Returns the result dict.
 
     The refusal/success both report the ceiling *ctx* (consistent with the wmx verb and the cpu
@@ -99,7 +126,7 @@ def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float, max_token
     if reason is not None:
         return _refused(ctx, reason)        # report the ceiling, not the effective ctx
 
-    completion = _generate(hf_id, prompt, max_tokens, eff_kv_bits, prefer_flash, weight_quant)
+    completion = _generate(hf_id, prompt, max_tokens, eff_kv_bits, prefer_flash, weight_quant, chunk)
     return {"context": ctx, "completion": completion}
 
 
@@ -116,11 +143,14 @@ def main(argv=None) -> None:
                     help="opt into FlashAttention-2 (Ampere+ only; else falls back to SDPA)")
     ap.add_argument("--weight-quant", default="none",
                     help="load weights quantized: int8 / int4 / fp8 (default none)")
+    ap.add_argument("--prefill-chunk", type=int, default=None,
+                    help="prefill in segments of N tokens (chunked prefill); default single-shot")
     args = ap.parse_args(argv)
     prompt = sys.stdin.read()               # PROMPT comes from stdin, never argv
     result = run(args.hf_id, args.ctx, margin_gb=args.margin, overhead_gb=args.overhead,
                  max_tokens=args.max_tokens, prompt=prompt, kv_bits=args.kv_bits,
-                 prefer_flash=args.flash_attn, weight_quant=args.weight_quant)
+                 prefer_flash=args.flash_attn, weight_quant=args.weight_quant,
+                 chunk=args.prefill_chunk)
     print(json.dumps(result), flush=True)
 
 

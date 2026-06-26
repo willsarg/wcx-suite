@@ -45,6 +45,165 @@ def test_fill_kv_quant_uses_generate_with_hqq_cache():
     assert calls[0][2]["cache_config"]["nbits"] == 4
 
 
+class _FakeIds:
+    """Minimal stand-in for a (1, N) token tensor: knows its length, device, and slices."""
+    def __init__(self, n): self.n = n; self.device = "cuda"
+    @property
+    def shape(self): return (1, self.n)
+    def __getitem__(self, key):
+        sl = key[1]
+        return f"ids[{sl.start}:{sl.stop}]"
+
+
+def _arange_torch():
+    return types.SimpleNamespace(arange=lambda s, e, device=None: f"arange({s},{e})")
+
+
+class _CacheModel:
+    """Records each forward; returns logits + threads a growing cache via .past_key_values."""
+    def __init__(self): self.calls = []
+    def __call__(self, ids, past_key_values=None, cache_position=None,
+                 use_cache=None, logits_to_keep=None):
+        self.calls.append({"ids": ids, "cache_position": cache_position,
+                           "cache_in": past_key_values, "logits_to_keep": logits_to_keep})
+        return types.SimpleNamespace(logits=f"logits@{ids}",
+                                     past_key_values=f"{past_key_values}+{ids}")
+
+
+def test_chunked_prefill_feeds_one_chunk_per_forward_with_cache_position():
+    model = _CacheModel()
+    _cache, _last = probe_worker._chunked_prefill(
+        model, _FakeIds(2500), _arange_torch(), chunk=1000, cache="C0")
+    # 2500 over chunk=1000 → exactly three forwards, the last a short tail
+    assert [c["ids"] for c in model.calls] == ["ids[0:1000]", "ids[1000:2000]", "ids[2000:2500]"]
+    assert [c["cache_position"] for c in model.calls] == [
+        "arange(0,1000)", "arange(1000,2000)", "arange(2000,2500)"]
+
+
+def test_chunked_prefill_returns_last_logits_and_threaded_cache():
+    model = _CacheModel()
+    cache, last = probe_worker._chunked_prefill(
+        model, _FakeIds(2500), _arange_torch(), chunk=1000, cache="C0")
+    assert last == "logits@ids[2000:2500]"                  # only the final chunk's logits
+    assert cache == "C0+ids[0:1000]+ids[1000:2000]+ids[2000:2500]"   # cache threaded through all
+
+
+def test_chunked_prefill_single_pass_when_prompt_fits_one_chunk():
+    model = _CacheModel()
+    probe_worker._chunked_prefill(model, _FakeIds(400), _arange_torch(), chunk=512, cache="C0")
+    assert len(model.calls) == 1                            # ≤ chunk ⇒ exactly one forward (= today)
+    assert model.calls[0]["ids"] == "ids[0:400]"
+    assert model.calls[0]["logits_to_keep"] == 1
+
+
+def _fake_cache_utils(monkeypatch):
+    cu = types.SimpleNamespace(DynamicCache=lambda: "DYN",
+                               QuantizedCache=lambda **k: ("QC", k))
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(cache_utils=cu))
+    monkeypatch.setitem(sys.modules, "transformers.cache_utils", cu)
+    return cu
+
+
+def test_new_cache_fp16_builds_dynamic_cache(monkeypatch):
+    _fake_cache_utils(monkeypatch)
+    model = types.SimpleNamespace(config="CFG")
+    assert probe_worker._new_cache(None, _fake_torch(), model) == "DYN"
+
+
+def test_new_cache_quantized_builds_hqq_quantized_cache(monkeypatch):
+    _fake_cache_utils(monkeypatch)
+    model = types.SimpleNamespace(config="CFG")
+    kind, kw = probe_worker._new_cache(4, _fake_torch(), model)
+    assert kind == "QC"
+    # transformers 5.x QuantizedCache(backend, config, nbits, q_group_size) — config is the model's
+    assert kw["backend"] == "hqq" and kw["config"] == "CFG"
+    assert kw["nbits"] == 4 and kw["q_group_size"] == probe_worker.models.KV_GROUP_SIZE
+
+
+def test_fill_kv_chunk_routes_fp16_through_chunked_prefill(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(probe_worker, "_new_cache", lambda kv_bits, torch, model: f"cache(kv={kv_bits})")
+    monkeypatch.setattr(probe_worker, "_chunked_prefill",
+                        lambda model, ids, torch, *, chunk, cache:
+                        seen.update(chunk=chunk, cache=cache) or ("C", "L"))
+
+    class M:
+        def __call__(self, ids): seen["forward"] = True
+        def generate(self, *a, **k): seen["generate"] = True
+
+    probe_worker._fill_kv(M(), "IDS", None, _fake_torch(), chunk=512)
+    assert seen["chunk"] == 512 and seen["cache"] == "cache(kv=None)"
+    assert "forward" not in seen and "generate" not in seen   # chunked, never single-shot
+
+
+def test_fill_kv_chunk_quantized_falls_back_to_single_shot_on_incompat(monkeypatch):
+    calls = []
+    monkeypatch.setattr(probe_worker, "_new_cache", lambda kv_bits, torch, model: "QCACHE")
+
+    def boom(*a, **k): raise NotImplementedError("HQQ cache can't take a multi-token update")
+    monkeypatch.setattr(probe_worker, "_chunked_prefill", boom)
+
+    class M:
+        def __call__(self, ids): calls.append(("forward", ids))
+        def generate(self, ids, max_new_tokens=None, do_sample=None, **kw):
+            calls.append(("generate", max_new_tokens, kw.get("cache_implementation")))
+
+    probe_worker._fill_kv(M(), "IDS", 4, _fake_torch(), chunk=512)
+    # chunked path raised → fall back to the existing single-shot quantized generate, not a crash
+    assert calls == [("generate", 1, "quantized")]
+
+
+def test_fill_kv_chunk_does_not_swallow_oom(monkeypatch):
+    monkeypatch.setattr(probe_worker, "_new_cache", lambda kv_bits, torch, model: "C")
+
+    def oom(*a, **k): raise RuntimeError("CUDA out of memory")
+    monkeypatch.setattr(probe_worker, "_chunked_prefill", oom)
+
+    class M:
+        def __call__(self, ids): raise AssertionError("must not fall back on OOM")
+        def generate(self, *a, **k): raise AssertionError("must not fall back on OOM")
+
+    try:
+        probe_worker._fill_kv(M(), "IDS", None, _fake_torch(), chunk=512)
+        raise AssertionError("OOM should propagate, not be swallowed")
+    except RuntimeError as e:
+        assert "out of memory" in str(e)
+
+
+def _mock_gpu_for_orchestrator(monkeypatch):
+    """Mock the heavy GPU/transformers deps so characterize/measure run host-side; returns the dict
+    that records what `_fill_kv` was handed (the measure↔run lockstep seam)."""
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: True,
+                                   get_device_name=lambda i: "RTX 2070"),
+        randint=lambda lo, hi, shape, device=None: "IDS")
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(
+        AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda mid: None)))
+    monkeypatch.setattr(probe_worker, "_load_model",
+                        lambda mid, torch, **k: types.SimpleNamespace(
+                            config=types.SimpleNamespace(vocab_size=32000)))
+    monkeypatch.setattr(probe_worker, "_used_mb", lambda: 4096.0)
+    seen = {}
+    monkeypatch.setattr(probe_worker, "_fill_kv",
+                        lambda model, ids, kv_bits, torch, **k: seen.update(k))
+    return seen
+
+
+def test_characterize_threads_chunk_into_fill_kv(monkeypatch):
+    seen = _mock_gpu_for_orchestrator(monkeypatch)
+    out = probe_worker.characterize("org/m", "2000", chunk=256)
+    assert out["ok"] is True and seen.get("chunk") == 256   # chunked measurement, certified at 256
+
+
+def test_measure_threads_chunk_into_fill_kv(monkeypatch):
+    seen = _mock_gpu_for_orchestrator(monkeypatch)
+    monkeypatch.setattr(probe_worker, "_used_gb", lambda: 4.0)
+    monkeypatch.setattr(probe_worker, "_start_watchdog", lambda abort: None)
+    out = probe_worker.measure("org/m", "2000", "7.0", chunk=256)
+    assert out["ok"] is True and seen.get("chunk") == 256   # run will prefill the same way
+
+
 def test_worker_unknown_mode(capsys):
     rc = probe_worker.main(["bogus"])
     out = json.loads(capsys.readouterr().out)
@@ -94,6 +253,14 @@ def test_load_model_device_map_for_quantized_else_to_cuda(monkeypatch):
     seen.clear()
     probe_worker._load_model("m", ft, weight_quant="none")            # fp16 → .to("cuda")
     assert seen.get("to") == "cuda" and "device_map" not in seen["kw"]
+
+
+def test_main_strips_prefill_chunk_value_into_int_kwarg(monkeypatch, capsys):
+    seen = {}
+    monkeypatch.setitem(probe_worker._MODES, "fake",
+                        lambda *a, **k: seen.update(args=a, kw=k) or {"ok": True})
+    probe_worker.main(["fake", "model", "--prefill-chunk", "256", "2000"])
+    assert seen["kw"] == {"chunk": 256} and seen["args"] == ("model", "2000")
 
 
 def test_main_no_flash_attn_means_no_prefer_kwarg(monkeypatch, capsys):
