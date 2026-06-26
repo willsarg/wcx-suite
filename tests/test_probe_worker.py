@@ -56,7 +56,8 @@ class _FakeIds:
 
 
 def _arange_torch():
-    return types.SimpleNamespace(arange=lambda s, e, device=None: f"arange({s},{e})")
+    return types.SimpleNamespace(arange=lambda s, e, device=None: f"arange({s},{e})",
+                                 cuda=types.SimpleNamespace(empty_cache=lambda: None))
 
 
 class _CacheModel:
@@ -86,6 +87,18 @@ def test_chunked_prefill_returns_last_logits_and_threaded_cache():
         model, _FakeIds(2500), _arange_torch(), chunk=1000, cache="C0")
     assert last == "logits@ids[2000:2500]"                  # only the final chunk's logits
     assert cache == "C0+ids[0:1000]+ids[1000:2000]+ids[2000:2500]"   # cache threaded through all
+
+
+def test_chunked_prefill_empties_cache_after_each_chunk():
+    # Releasing the per-chunk transient scratch keeps torch's reserved pool ~= the live working set,
+    # so it never bloats past dedicated VRAM and spills to shared RAM (the ~4x-slowdown cliff).
+    model = _CacheModel()
+    empties = []
+    torch = types.SimpleNamespace(
+        arange=lambda s, e, device=None: f"arange({s},{e})",
+        cuda=types.SimpleNamespace(empty_cache=lambda: empties.append(1)))
+    probe_worker._chunked_prefill(model, _FakeIds(2500), torch, chunk=1000, cache="C0")
+    assert len(empties) == 3            # 2500/1000 → 3 chunks, one empty_cache per chunk
 
 
 def test_chunked_prefill_single_pass_when_prompt_fits_one_chunk():

@@ -95,6 +95,11 @@ def _chunked_prefill(model, ids, torch, *, chunk, cache):
                     cache_position=torch.arange(s, e, device=ids.device),
                     use_cache=True, logits_to_keep=1)
         cache, last_logits = out.past_key_values, out.logits
+        # Return the freed transient attention scratch to the driver after each chunk. The live KV
+        # cache is still referenced, so this only releases the per-chunk scratch — keeping torch's
+        # reserved pool ~= the working set instead of bloating past dedicated VRAM and spilling to
+        # shared RAM (the ~4x slowdown). Negligible overhead; keeps long-context prefill in-VRAM.
+        torch.cuda.empty_cache()
     return cache, last_logits
 
 
