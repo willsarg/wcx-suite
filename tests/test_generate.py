@@ -32,8 +32,12 @@ def _limits(used_gb=2.0):
 class _FakeTokenizer:
     """Minimal stand-in for transformers.AutoTokenizer — encode + decode + call + .to-able ids."""
 
+    chat_template = "fake_template"      # non-None → instruct model by default
+
     def __init__(self, n_prompt_tokens):
         self._n = n_prompt_tokens
+        self._apply_chat_template_calls = []
+        self._raw_call_count = 0
 
     @classmethod
     def make(cls, n_prompt_tokens):
@@ -43,7 +47,15 @@ class _FakeTokenizer:
     def encode(self, prompt):
         return list(range(self._n))
 
+    def apply_chat_template(self, messages, add_generation_prompt=True, return_tensors=None):
+        self._apply_chat_template_calls.append({
+            "messages": messages,
+            "add_generation_prompt": add_generation_prompt,
+        })
+        return _FakeIds([list(range(self._n))])
+
     def __call__(self, prompt, return_tensors=None):
+        self._raw_call_count += 1
         # transformers returns a BatchEncoding with input_ids; mimic the .to(device) + indexing.
         ids = list(range(self._n))
         return types.SimpleNamespace(
@@ -119,6 +131,7 @@ def _patch_engine(monkeypatch, *, info=None, limits=None, n_prompt_tokens=6,
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    gate_seen["tok"] = tok_obj
     return gate_seen
 
 
@@ -354,3 +367,32 @@ def test_main_empty_prompt_short_circuits_token_count(monkeypatch, capsys):
     # effective ctx = min(40960, 0 + 256) = 256
     assert seen["ctx"] == 256
     assert parsed["context"] == 40960
+
+
+# ---- chat-template tokenisation (instruct model fix) -------------------------------------
+
+def test_generate_uses_chat_template_for_instruct_model(monkeypatch):
+    """_generate must call apply_chat_template for models that have one (e.g. gemma-4).
+
+    Raw prompts on instruct models yield empty/garbage output; the template wraps the user
+    turn so the model sees the instruction format it was fine-tuned on.
+    """
+    seen = _patch_engine(monkeypatch, n_prompt_tokens=6)
+    tok = seen["tok"]                           # tok.chat_template = "fake_template" (default)
+    generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=256, prompt="hello")
+    assert len(tok._apply_chat_template_calls) == 1, "apply_chat_template was not called"
+    call = tok._apply_chat_template_calls[0]
+    assert call["messages"] == [{"role": "user", "content": "hello"}]
+    assert call["add_generation_prompt"] is True
+    assert tok._raw_call_count == 0, "__call__ was used instead of apply_chat_template"
+
+
+def test_generate_falls_back_to_raw_tokenize_for_base_model(monkeypatch):
+    """When tokenizer.chat_template is None (base model), _generate must fall back to the
+    raw tokenizer call — apply_chat_template would raise with a missing template."""
+    seen = _patch_engine(monkeypatch, n_prompt_tokens=6)
+    tok = seen["tok"]
+    tok.chat_template = None                    # simulate a base (non-instruct) model
+    generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=256, prompt="hello")
+    assert len(tok._apply_chat_template_calls) == 0, "apply_chat_template called on base model"
+    assert tok._raw_call_count == 1, "raw __call__ was not used as fallback"

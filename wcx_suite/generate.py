@@ -60,6 +60,24 @@ def _greedy_decode(model, cache, last_logits, torch, *, max_tokens, start_pos, e
     return ids
 
 
+def _apply_prompt(tokenizer, prompt):
+    """Tokenize *prompt* for generation, applying the chat template for instruct models.
+
+    Instruct models (``chat_template`` is set) require the prompt wrapped in their template;
+    a raw prompt yields empty or garbage output (confirmed live with gemma-4). Base models
+    (no ``chat_template``) fall back to raw tokenisation — calling ``apply_chat_template``
+    on them raises a ``TemplateError`` for the missing template. Returns the input-ids tensor
+    already on CUDA, ready to pass directly to ``model.generate`` or ``_chunked_prefill``.
+    """
+    if getattr(tokenizer, "chat_template", None) is not None:
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            add_generation_prompt=True,
+            return_tensors="pt",
+        ).to("cuda")
+    return tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
+
+
 def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = None,
               prefer_flash: bool = False, weight_quant: str = "none",
               chunk: int | None = None) -> str:
@@ -79,17 +97,17 @@ def _generate(hf_id: str, prompt: str, max_tokens: int, kv_bits: int | None = No
     tokenizer = AutoTokenizer.from_pretrained(hf_id)
     model = _load_model(hf_id, torch, prefer_flash=prefer_flash, weight_quant=weight_quant)
 
-    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-    prompt_len = inputs.input_ids.shape[1]
+    input_ids = _apply_prompt(tokenizer, prompt)
+    prompt_len = input_ids.shape[1]
     if chunk is not None:
         with torch.no_grad():
             cache, last_logits = _chunked_prefill(
-                model, inputs.input_ids, torch, chunk=chunk, cache=_new_cache(kv_bits, torch, model))
+                model, input_ids, torch, chunk=chunk, cache=_new_cache(kv_bits, torch, model))
             new_tokens = _greedy_decode(model, cache, last_logits, torch, max_tokens=max_tokens,
                                         start_pos=prompt_len, eos_id=tokenizer.eos_token_id)
         return tokenizer.decode(new_tokens, skip_special_tokens=True)
     with torch.no_grad():
-        out = model.generate(input_ids=inputs.input_ids, max_new_tokens=max_tokens,
+        out = model.generate(input_ids=input_ids, max_new_tokens=max_tokens,
                              **models.kv_cache_kwargs(kv_bits))
     new_tokens = out[0][prompt_len:]                         # decode only the newly generated span
     return tokenizer.decode(new_tokens, skip_special_tokens=True)

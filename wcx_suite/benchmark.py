@@ -42,11 +42,10 @@ def _generate_one(model, tokenizer, prompt: str, max_tokens: int, kv=None, ch=No
     footprint the ceiling was certified at. Returns the NEW text only."""
     import torch                                            # lazy (NVIDIA-only [cuda] extra)
 
-    from .generate import _greedy_decode
+    from .generate import _apply_prompt, _greedy_decode
     from .probe_worker import _chunked_prefill, _new_cache
 
-    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-    input_ids = inputs.input_ids
+    input_ids = _apply_prompt(tokenizer, prompt)
     prompt_len = input_ids.shape[1]
     if ch is not None:
         with torch.no_grad():
