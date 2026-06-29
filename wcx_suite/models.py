@@ -148,7 +148,8 @@ def weights_gb(hf_id: str) -> float:
         if os.path.islink(f) or not os.path.isfile(f):
             continue
         total += os.path.getsize(f)
-    return total / 1e9
+    return total / GIB    # binary GiB — consistent with the VRAM wall/used/budget (all /1024**3);
+                          # /1e9 (decimal GB) over-stated the footprint ~7% and over-refused (#105)
 
 
 def _read_config(hf_id: str) -> dict | None:

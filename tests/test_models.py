@@ -55,7 +55,9 @@ def test_describe_parses_llama_style_config(tmp_path, monkeypatch):
     assert info.max_context == 8192
     assert info.is_causal is True
     assert info.can_quantize_kv is True        # no sliding window
-    assert info.weights_gb == pytest.approx(0.27, abs=0.01)
+    # binary GiB (consistent with the VRAM wall/used/budget, all /1024**3) — NOT decimal GB.
+    # 270e6 B / 1024**3 = 0.2515, rounded to 0.25 by describe (was 0.27 under the /1e9 bug).
+    assert info.weights_gb == pytest.approx(0.25, abs=0.01)
 
 
 def test_kv_slope_matches_analytic_fp16(tmp_path, monkeypatch):
