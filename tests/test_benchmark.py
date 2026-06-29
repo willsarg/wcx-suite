@@ -60,19 +60,23 @@ class _FakeTokenizer:
         self._n = n_prompt_tokens
         self._apply_chat_template_calls = []
         self._raw_call_count = 0
+        self._last_call_text = None
 
     def encode(self, prompt):
         return list(range(self._n))
 
-    def apply_chat_template(self, messages, add_generation_prompt=True, return_tensors=None):
+    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=False):
         self._apply_chat_template_calls.append({
             "messages": messages,
             "add_generation_prompt": add_generation_prompt,
+            "tokenize": tokenize,
         })
-        return _FakeIds([list(range(self._n))])
+        # tokenize=False renders a STRING (not a tensor/BatchEncoding); __call__ then tokenises it.
+        return f"<TPL>{messages[0]['content']}"
 
     def __call__(self, prompt, return_tensors=None):
         self._raw_call_count += 1
+        self._last_call_text = prompt
         ids = list(range(self._n))
         return types.SimpleNamespace(
             input_ids=_FakeIds([ids]),
@@ -388,7 +392,8 @@ def test_generate_one_uses_chat_template_for_instruct_model(monkeypatch):
     call = tok._apply_chat_template_calls[0]
     assert call["messages"] == [{"role": "user", "content": "hello"}]
     assert call["add_generation_prompt"] is True
-    assert tok._raw_call_count == 0, "__call__ was used instead of apply_chat_template"
+    assert call["tokenize"] is False, "must render to a string (tokenize=False), not a tensor"
+    assert tok._last_call_text == "<TPL>hello"   # the templated string is what got tokenised
 
 
 def test_generate_one_falls_back_to_raw_tokenize_for_base_model(monkeypatch):
@@ -401,3 +406,4 @@ def test_generate_one_falls_back_to_raw_tokenize_for_base_model(monkeypatch):
                   prompts=["hello"])
     assert len(tok._apply_chat_template_calls) == 0, "apply_chat_template called on base model"
     assert tok._raw_call_count == 1, "raw __call__ was not used as fallback"
+    assert tok._last_call_text == "hello"       # the RAW prompt was tokenised, untemplated

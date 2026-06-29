@@ -38,6 +38,7 @@ class _FakeTokenizer:
         self._n = n_prompt_tokens
         self._apply_chat_template_calls = []
         self._raw_call_count = 0
+        self._last_call_text = None
 
     @classmethod
     def make(cls, n_prompt_tokens):
@@ -47,15 +48,19 @@ class _FakeTokenizer:
     def encode(self, prompt):
         return list(range(self._n))
 
-    def apply_chat_template(self, messages, add_generation_prompt=True, return_tensors=None):
+    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=False):
         self._apply_chat_template_calls.append({
             "messages": messages,
             "add_generation_prompt": add_generation_prompt,
+            "tokenize": tokenize,
         })
-        return _FakeIds([list(range(self._n))])
+        # transformers' tokenize=False renders a STRING (not a tensor/BatchEncoding); the worker
+        # then tokenises it via __call__. Returning a tensor here would hide the real-API bug.
+        return f"<TPL>{messages[0]['content']}"
 
     def __call__(self, prompt, return_tensors=None):
         self._raw_call_count += 1
+        self._last_call_text = prompt           # what actually got tokenised (templated or raw)
         # transformers returns a BatchEncoding with input_ids; mimic the .to(device) + indexing.
         ids = list(range(self._n))
         return types.SimpleNamespace(
@@ -384,7 +389,10 @@ def test_generate_uses_chat_template_for_instruct_model(monkeypatch):
     call = tok._apply_chat_template_calls[0]
     assert call["messages"] == [{"role": "user", "content": "hello"}]
     assert call["add_generation_prompt"] is True
-    assert tok._raw_call_count == 0, "__call__ was used instead of apply_chat_template"
+    assert call["tokenize"] is False, "must render to a string (tokenize=False), not a tensor"
+    # the RENDERED template string is what gets tokenised — proving the template was applied
+    # before tokenisation (regression guard for the transformers-5.x BatchEncoding crash).
+    assert tok._last_call_text == "<TPL>hello"
 
 
 def test_generate_falls_back_to_raw_tokenize_for_base_model(monkeypatch):
@@ -396,3 +404,4 @@ def test_generate_falls_back_to_raw_tokenize_for_base_model(monkeypatch):
     generate.run("org/m", 40960, margin_gb=1.0, overhead_gb=0.6, max_tokens=256, prompt="hello")
     assert len(tok._apply_chat_template_calls) == 0, "apply_chat_template called on base model"
     assert tok._raw_call_count == 1, "raw __call__ was not used as fallback"
+    assert tok._last_call_text == "hello"       # the RAW prompt was tokenised, untemplated

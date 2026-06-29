@@ -64,17 +64,20 @@ def _apply_prompt(tokenizer, prompt):
     """Tokenize *prompt* for generation, applying the chat template for instruct models.
 
     Instruct models (``chat_template`` is set) require the prompt wrapped in their template;
-    a raw prompt yields empty or garbage output (confirmed live with gemma-4). Base models
-    (no ``chat_template``) fall back to raw tokenisation — calling ``apply_chat_template``
-    on them raises a ``TemplateError`` for the missing template. Returns the input-ids tensor
-    already on CUDA, ready to pass directly to ``model.generate`` or ``_chunked_prefill``.
+    a raw prompt yields empty or garbage output (confirmed live with gemma). Base models
+    (no ``chat_template``) fall back to raw tokenisation. Returns the input-ids tensor already
+    on CUDA, ready to pass directly to ``model.generate`` or ``_chunked_prefill``.
+
+    The template is rendered with ``tokenize=False`` (a string) and then tokenised, NOT via
+    ``apply_chat_template(return_tensors="pt")`` — under transformers 5.x the latter returns a
+    ``BatchEncoding`` (dict-like), not a bare tensor, so ``.shape`` would crash (caught live on
+    transformers 5.12.1). Rendering to a string keeps both branches identical and version-stable.
     """
     if getattr(tokenizer, "chat_template", None) is not None:
-        return tokenizer.apply_chat_template(
+        text = tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
-            add_generation_prompt=True,
-            return_tensors="pt",
-        ).to("cuda")
+            add_generation_prompt=True, tokenize=False)
+        return tokenizer(text, return_tensors="pt").to("cuda").input_ids
     return tokenizer(prompt, return_tensors="pt").to("cuda").input_ids
 
 
