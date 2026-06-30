@@ -20,17 +20,27 @@ A CUDA over-allocation usually raises an out-of-memory error and kills the *work
 than the machine — but on a GPU that also drives a display, exhausting VRAM can freeze the
 desktop or trip a driver reset. The rule holds: stay under the wall.
 
-## Status
-
-Barebones. Today it reads your VRAM wall live (via `nvidia-smi`, zero dependencies):
+## Quick start
 
 ```bash
 uv sync
-uv run wcx-suite system     # GPU, VRAM total/free, the wall, and the safe budget
+uv run wcx-suite system                 # GPU, VRAM total/free, the wall, and the safe budget
+uv run wcx-suite calibrate              # measure this card's cold-start VRAM overhead (once per machine)
+uv run wcx-suite characterize <hf_id>   # safe probe → fitted safe context ceiling, stored
 ```
 
-Characterization (safe probe → fitted context ceiling), a model registry, and the launch
-gate are being built out next, mirroring wmx-suite.
+`characterize` ramps context under the engine and **refuses before it ever loads past the
+VRAM wall**, then fits and stores the safe ceiling — the same predict-don't-probe discipline
+as wmx-suite. Footprint is read in binary **GiB** to match the wall, and weight/KV-cache
+quantization (int4/int8/fp8 weights, hqq KV) is wired through the loader.
+
+## Status
+
+A functional measurement engine, not barebones anymore: `system` + `calibrate` +
+`characterize`, plus governed **generate** and capability **benchmark** workers that
+[project-ara](https://github.com/willsarg/project-ara) drives out-of-process
+(`python -m wcx_suite.generate` / `wcx_suite.benchmark`). Both apply each model's **own chat
+template** so template-strict instruct models (e.g. Gemma) behave correctly. **186 tests pass.**
 
 ## Where it fits
 
